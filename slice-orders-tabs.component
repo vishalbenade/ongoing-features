@@ -1,92 +1,178 @@
-import { Component, signal, computed } from '@angular/core';
-import { CommonModule } from '@angular/common';
+// ─────────────────────────────────────────────
+// EQBEAM Slice Orders Tab Bar
+// Bootstrap handles: border, shadow, padding, bg
+// This file handles: tab geometry, states, hover
+// ─────────────────────────────────────────────
 
-export type TabState = 'active' | 'inactive' | 'disabled';
+// Tokens — update once to retheme everywhere
+$eq-font:            'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+$eq-font-size:       12px;
 
-export interface Tab {
-  id: string;
-  label: string;
-  icon: string;           // inline SVG path data
-  viewBox: string;
-  state: TabState;
+$eq-bar-bg:          #f5f5f5;
+$eq-bar-height:      34px;
+$eq-tab-height:      28px;
+
+$eq-color-inactive:  #444444;
+$eq-color-active:    #1a1a1a;
+$eq-color-disabled:  #b0b0b0;
+
+$eq-accent-blue:     #1565c0;
+$eq-hover-bg:        #e8f0fb;
+$eq-hover-color:     #1a56b0;
+$eq-hover-border:    #c5d8f5;
+$eq-hover-bar:       #4a90d9;
+
+$eq-active-border:   #c0cfe8;
+
+// ─── Panel wrapper ───────────────────────────
+.eq-panel {
+  font-family: $eq-font;
+  font-size: $eq-font-size;
+  border-radius: 2px;         // tighter than Bootstrap default
+  overflow: hidden;
 }
 
-@Component({
-  selector: 'app-slice-orders-tabs',
-  standalone: true,
-  imports: [CommonModule],
-  templateUrl: './slice-orders-tabs.component.html',
-  styleUrls: ['./slice-orders-tabs.component.scss'],
-})
-export class SliceOrdersTabsComponent {
+// ─── Tab bar ─────────────────────────────────
+.eq-tabbar {
+  background: $eq-bar-bg;
+  height: $eq-bar-height;
+  gap: 2px;
+}
 
-  readonly tabs = signal<Tab[]>([
-    {
-      id: 'slice-orders',
-      label: 'Slice Orders',
-      viewBox: '0 0 16 16',
-      icon: 'M1 2h14v2H1zm0 5h14v2H1zm0 5h14v2H1z',
-      state: 'active',
-    },
-    {
-      id: 'create',
-      label: 'Create',
-      viewBox: '0 0 16 16',
-      icon: 'M7 1h2v14H7zm-6 6h14v2H1z',
-      state: 'inactive',
-    },
-    {
-      id: 'create-execute',
-      label: 'Create & Execute',
-      viewBox: '0 0 16 16',
-      icon: 'M8 1L2 4v4c0 3.3 2.5 6.4 6 7 3.5-.6 6-3.7 6-7V4L8 1z',
-      state: 'inactive',
-    },
-    {
-      id: 'execute',
-      label: 'Execute',
-      viewBox: '0 0 16 16',
-      icon: 'M4 2l10 6-10 6V2z',
-      state: 'inactive',
-    },
-    {
-      id: 'amend',
-      label: 'Amend',
-      viewBox: '0 0 16 16',
-      icon: 'M11.5 1.5l3 3L5 14H2v-3L11.5 1.5z',
-      state: 'inactive',
-    },
-    {
-      id: 'copy',
-      label: 'Copy',
-      viewBox: '0 0 16 16',
-      // two-path copy icon kept as single path approximation
-      icon: 'M5 5h9v10H5z M2 2h9v3H4v8H2z',
-      state: 'inactive',
-    },
-    {
-      id: 'audit-trail',
-      label: 'Audit Trail',
-      viewBox: '0 0 16 16',
-      icon: 'M3 1h10a1 1 0 011 1v12a1 1 0 01-1 1H3a1 1 0 01-1-1V2a1 1 0 011-1z M4 5h8 M4 8h8 M4 11h5',
-      state: 'disabled',
-    },
-  ]);
+// ─── Base tab ────────────────────────────────
+.eq-tab {
+  // reset Bootstrap button styles
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  outline: none;
+  box-shadow: none;
 
-  readonly activeTab = computed(() =>
-    this.tabs().find(t => t.state === 'active') ?? null
-  );
+  // layout
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: $eq-tab-height;
+  padding: 0 11px;
+  margin-bottom: -1px;      // overlaps the bar's border-bottom
 
-  activate(selectedId: string): void {
-    this.tabs.update(tabs =>
-      tabs.map(tab => {
-        if (tab.state === 'disabled') return tab;
-        return { ...tab, state: tab.id === selectedId ? 'active' : 'inactive' };
-      })
-    );
+  // typography
+  font-family: $eq-font;
+  font-size: $eq-font-size;
+  font-weight: 400;
+  letter-spacing: 0.1px;
+  white-space: nowrap;
+  color: $eq-color-inactive;
+
+  // behaviour
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background   0.15s ease,
+    color        0.15s ease,
+    border-color 0.15s ease,
+    box-shadow   0.15s ease;
+
+  svg {
+    flex-shrink: 0;
+    opacity: 0.65;
+    transition: opacity 0.15s ease;
+  }
+}
+
+// ─── Active state ────────────────────────────
+.eq-tab.active {
+  background: #ffffff;
+  color: $eq-color-active;
+  font-weight: 600;
+  border-color: $eq-active-border;
+  border-bottom-color: #ffffff;   // "erases" the bar's bottom border
+  box-shadow: 0 -1px 3px rgba($eq-accent-blue, 0.08);
+
+  svg {
+    opacity: 1;
   }
 
-  trackById(_: number, tab: Tab): string {
-    return tab.id;
+  // left accent bar
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 3px;
+    bottom: 0;
+    width: 2px;
+    border-radius: 2px 0 0 0;
+    background: $eq-accent-blue;
   }
+}
+
+// ─── Inactive state ──────────────────────────
+.eq-tab.inactive {
+  background: transparent;
+  color: $eq-color-inactive;
+
+  &:hover {
+    background: $eq-hover-bg;
+    color: $eq-hover-color;
+    border-color: $eq-hover-border;
+    border-bottom-color: transparent;
+
+    svg {
+      opacity: 0.9;
+    }
+
+    // top accent line slides in on hover
+    &::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 4px;
+      right: 4px;
+      height: 2px;
+      border-radius: 2px;
+      background: $eq-hover-bar;
+    }
+  }
+
+  &:focus-visible {
+    outline: 2px solid $eq-accent-blue;
+    outline-offset: -2px;
+    border-radius: 3px 3px 0 0;
+  }
+}
+
+// ─── Disabled state ──────────────────────────
+.eq-tab.disabled {
+  color: $eq-color-disabled;
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: none;   // prevent all interaction
+
+  svg {
+    opacity: 0.4;
+  }
+}
+
+// ─── Content area ────────────────────────────
+.eq-content {
+  min-height: 80px;
+  font-size: $eq-font-size;
+  color: #333;
+}
+
+.eq-pane-title {
+  font-weight: 600;
+  color: $eq-accent-blue;
+  margin-bottom: 4px;
+  font-size: $eq-font-size;
+}
+
+.eq-pane-body {
+  color: #666;
+  font-size: 11.5px;
+  line-height: 1.6;
+  margin: 0;
 }
