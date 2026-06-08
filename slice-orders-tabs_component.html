@@ -1,0 +1,93 @@
+<!-- eq-panel uses Bootstrap's border + shadow utilities; custom class handles radius/min-width -->
+<div class="eq-panel border border-secondary-subtle shadow-sm">
+
+  <!-- ═══ Tab bar ═══ -->
+  <!-- Bootstrap: d-flex align-items-end px-2; custom: eq-tabbar for height + bg -->
+  <div class="eq-tabbar d-flex align-items-end px-2 border-bottom border-secondary-subtle">
+
+    <button
+      *ngFor="let tab of tabs(); trackBy: trackById"
+      type="button"
+      class="eq-tab"
+      [class.active]="tab.state === 'active'"
+      [class.inactive]="tab.state === 'inactive'"
+      [class.disabled]="tab.state === 'disabled'"
+      [attr.aria-selected]="tab.state === 'active'"
+      [attr.aria-disabled]="tab.state === 'disabled'"
+      [attr.tabindex]="tab.state === 'disabled' ? -1 : 0"
+      (click)="activate(tab.id)"
+      (keydown.enter)="activate(tab.id)"
+      (keydown.space)="activate(tab.id)"
+    >
+      <!-- Icon -->
+      <svg
+        [attr.viewBox]="tab.viewBox"
+        width="11"
+        height="11"
+        fill="currentColor"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <path [attr.d]="tab.icon" />
+      </svg>
+
+      <!-- Label -->
+      <span>{{ tab.label }}</span>
+    </button>
+
+  </div>
+
+  <!-- ═══ Tab content ═══ -->
+  <!-- Bootstrap: p-3 bg-white; eq-content sets min-height + font -->
+  <div class="eq-content p-3 bg-white">
+    @switch (activeTab()?.id) {
+
+      @case ('slice-orders') {
+        <p class="eq-pane-title">Slice Orders</p>
+        <p class="eq-pane-body">
+          Displaying all slice orders for the selected root. Use filters to narrow by status or trader.
+        </p>
+      }
+
+      @case ('create') {
+        <p class="eq-pane-title">Create</p>
+        <p class="eq-pane-body">
+          Create a new slice order for the selected instrument and account.
+        </p>
+      }
+
+      @case ('create-execute') {
+        <p class="eq-pane-title">Create &amp; Execute</p>
+        <p class="eq-pane-body">
+          Create and immediately route the order to market.
+        </p>
+      }
+
+      @case ('execute') {
+        <p class="eq-pane-title">Execute</p>
+        <p class="eq-pane-body">
+          Execute the selected pending slice order.
+        </p>
+      }
+
+      @case ('amend') {
+        <p class="eq-pane-title">Amend</p>
+        <p class="eq-pane-body">
+          Modify quantity, limit price, or other attributes of the selected order.
+        </p>
+      }
+
+      @case ('copy') {
+        <p class="eq-pane-title">Copy</p>
+        <p class="eq-pane-body">
+          Duplicate the selected order as a new draft.
+        </p>
+      }
+
+      @default {
+        <p class="eq-pane-body text-muted">No active tab.</p>
+      }
+    }
+  </div>
+
+</div>
