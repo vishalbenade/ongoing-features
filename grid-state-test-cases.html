@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AG Grid State — Manual Test Cases</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg:        #0d1117;
+    --bg2:       #161b22;
+    --bg3:       #21262d;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --muted:     #7d8590;
+    --pass:      #3fb950;
+    --fail:      #f85149;
+    --warn:      #d29922;
+    --info:      #58a6ff;
+    --purple:    #bc8cff;
+    --orange:    #ffa657;
+    --tag-bg:    #1f2937;
+    --radius:    6px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 40px 24px;
+  }
+
+  .page-header {
+    max-width: 1100px;
+    margin: 0 auto 40px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 28px;
+  }
+
+  .page-header h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--info);
+    letter-spacing: -0.5px;
+    margin-bottom: 6px;
+  }
+
+  .page-header p {
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .stats-bar {
+    max-width: 1100px;
+    margin: 0 auto 32px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .stat {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 18px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+  }
+
+  .stat span { color: var(--muted); margin-right: 6px; }
+  .stat strong { color: var(--text); }
+  .stat.s-total strong { color: var(--info); }
+  .stat.s-sections strong { color: var(--purple); }
+  .stat.s-critical strong { color: var(--fail); }
+  .stat.s-edge strong { color: var(--warn); }
+
+  .main { max-width: 1100px; margin: 0 auto; }
+
+  /* ── Section ── */
+  .section {
+    margin-bottom: 36px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .section-header:hover { background: var(--bg3); }
+
+  .section-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--bg);
+    background: var(--info);
+    border-radius: 4px;
+    padding: 2px 8px;
+    min-width: 28px;
+    text-align: center;
+  }
+
+  .section-title {
+    font-weight: 600;
+    font-size: 14px;
+    flex: 1;
+  }
+
+  .section-count {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 2px 10px;
+  }
+
+  .chevron {
+    color: var(--muted);
+    font-size: 12px;
+    transition: transform 0.2s;
+  }
+
+  .section.collapsed .chevron { transform: rotate(-90deg); }
+  .section.collapsed .section-body { display: none; }
+
+  .section-body { padding: 0; }
+
+  /* ── Test Case ── */
+  .tc {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    gap: 0 14px;
+    align-items: start;
+    transition: background 0.15s;
+  }
+
+  .tc:last-child { border-bottom: none; }
+  .tc:hover { background: rgba(88,166,255,0.03); }
+  .tc.done { background: rgba(63,185,80,0.04); }
+  .tc.failed { background: rgba(248,81,73,0.06); }
+
+  /* checkbox */
+  .tc-check {
+    margin-top: 2px;
+    width: 18px;
+    height: 18px;
+    accent-color: var(--pass);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .tc-body { display: flex; flex-direction: column; gap: 6px; }
+
+  .tc-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .tc-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 6px;
+    white-space: nowrap;
+    margin-top: 1px;
+  }
+
+  .tc-title {
+    font-weight: 500;
+    font-size: 13.5px;
+    color: var(--text);
+    line-height: 1.4;
+  }
+
+  .badge {
+    font-size: 10px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    border-radius: 3px;
+    padding: 1px 6px;
+    white-space: nowrap;
+    margin-top: 1px;
+  }
+
+  .badge-critical { background: rgba(248,81,73,0.18); color: var(--fail); border: 1px solid rgba(248,81,73,0.3); }
+  .badge-edge     { background: rgba(210,153,34,0.18); color: var(--warn); border: 1px solid rgba(210,153,34,0.3); }
+  .badge-happy    { background: rgba(63,185,80,0.15);  color: var(--pass); border: 1px solid rgba(63,185,80,0.25); }
+  .badge-parent   { background: rgba(188,140,255,0.15);color: var(--purple);border: 1px solid rgba(188,140,255,0.3); }
+
+  .tc-steps {
+    margin-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .step {
+    display: flex;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .step-n {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--bg);
+    background: var(--muted);
+    border-radius: 50%;
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .expect {
+    margin-top: 6px;
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    background: rgba(63,185,80,0.07);
+    border: 1px solid rgba(63,185,80,0.2);
+    border-radius: 4px;
+    padding: 7px 10px;
+    font-size: 12px;
+    color: #7ee787;
+  }
+
+  .expect::before {
+    content: "✓";
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 4px;
+    color: var(--orange);
+  }
+
+  /* ── Progress bar ── */
+  .progress-wrap {
+    max-width: 1100px;
+    margin: 0 auto 28px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+  }
+
+  .progress-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 8px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .progress-bar-bg {
+    height: 6px;
+    background: var(--bg3);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--pass), var(--info));
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.4s ease;
+  }
+
+  /* ── Reset button ── */
+  .toolbar {
+    max-width: 1100px;
+    margin: 0 auto 20px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
+  .btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    background: var(--bg2);
+    color: var(--muted);
+    transition: all 0.15s;
+  }
+
+  .btn:hover { background: var(--bg3); color: var(--text); border-color: var(--muted); }
+  .btn.primary { background: rgba(88,166,255,0.12); color: var(--info); border-color: rgba(88,166,255,0.3); }
+  .btn.primary:hover { background: rgba(88,166,255,0.2); }
+
+  .footer {
+    max-width: 1100px;
+    margin: 40px auto 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    display: flex;
+    justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>AG Grid State Management — Manual Test Cases</h1>
+  <p>Scope: grid-state.service.ts · grid-state.merger.ts · base-grid.component.ts &nbsp;|&nbsp; Check each case after implementation</p>
+</div>
+
+<div class="stats-bar">
+  <div class="stat s-total"><span>Total</span><strong id="stat-total">0</strong></div>
+  <div class="stat s-sections"><span>Sections</span><strong>9</strong></div>
+  <div class="stat s-critical"><span>Critical</span><strong id="stat-critical">0</strong></div>
+  <div class="stat s-edge"><span>Edge Cases</span><strong id="stat-edge">0</strong></div>
+  <div class="stat"><span>Completed</span><strong id="stat-done">0</strong></div>
+</div>
+
+<div class="progress-wrap">
+  <div class="progress-label">
+    <span>Test Progress</span>
+    <span id="prog-label">0 / 0</span>
+  </div>
+  <div class="progress-bar-bg">
+    <div class="progress-bar-fill" id="prog-bar"></div>
+  </div>
+</div>
+
+<div class="toolbar">
+  <button class="btn" onclick="expandAll()">Expand All</button>
+  <button class="btn" onclick="collapseAll()">Collapse All</button>
+  <button class="btn primary" onclick="resetAll()">Reset Checks</button>
+</div>
+
+<div class="main" id="main"></div>
+
+<div class="footer">
+  <span>AG Grid State — Manual QA Checklist</span>
+  <span id="footer-date"></span>
+</div>
+
+<script>
+const SECTIONS = [
+  {
+    title: "First Load — No Saved State",
+    color: "#58a6ff",
+    cases: [
+      {
+        id: "FL-01", badge: "happy", title: "Grid renders with default column order",
+        steps: [
+          "Clear localStorage for this grid key",
+          "Open the page with the grid",
+          "Observe column order in the rendered grid"
+        ],
+        expect: "Columns appear in the exact order defined in COLUMNS array in the component"
+      },
+      {
+        id: "FL-02", badge: "happy", title: "Columns with defaultVisible: false are hidden on first load",
+        steps: [
+          "Clear localStorage",
+          "Ensure at least one column has defaultVisible: false in COLUMNS",
+          "Open the page"
+        ],
+        expect: "That column is hidden in the grid. All others are visible."
+      },
+      {
+        id: "FL-03", badge: "happy", title: "Columns render with correct defaultWidth on first load",
+        steps: [
+          "Clear localStorage",
+          "Open the page",
+          "Measure or visually inspect column widths"
+        ],
+        expect: "Each column width matches its defaultWidth value defined in COLUMNS"
+      },
+      {
+        id: "FL-04", badge: "happy", title: "No filters are applied on first load",
+        steps: [
+          "Clear localStorage",
+          "Open the page",
+          "Check filter icons in column headers"
+        ],
+        expect: "No filters are active. All rows are visible."
+      },
+      {
+        id: "FL-05", badge: "happy", title: "State is written to localStorage immediately on first load",
+        steps: [
+          "Clear localStorage",
+          "Open the page",
+          "Open DevTools → Application → localStorage",
+          "Look for key grid_state__{gridId}"
+        ],
+        expect: "Key exists with a valid JSON object containing schemaVersion, savedAt, columns, userFilters"
+      }
+    ]
+  },
+  {
+    title: "Column Order — Save & Restore",
+    color: "#3fb950",
+    cases: [
+      {
+        id: "CO-01", badge: "happy", title: "Column order is saved after drag-reorder",
+        steps: [
+          "Open the grid",
+          "Drag a column to a different position",
+          "Wait 600ms (debounce)",
+          "Check localStorage value"
+        ],
+        expect: "columns array in localStorage reflects the new column order"
+      },
+      {
+        id: "CO-02", badge: "happy", title: "Column order is restored on page reload",
+        steps: [
+          "Drag columns into a custom order",
+          "Hard-reload the page (Ctrl+Shift+R)",
+          "Observe column order"
+        ],
+        expect: "Columns appear in the exact same order the user left them"
+      },
+      {
+        id: "CO-03", badge: "critical", title: "New column added by developer appears at correct position",
+        steps: [
+          "Save a state with existing columns",
+          "Add a new column to COLUMNS array in code between two existing columns",
+          "Reload the page"
+        ],
+        expect: "New column appears between its two neighbours. Existing user column order is preserved for all other columns."
+      },
+      {
+        id: "CO-04", badge: "critical", title: "New column added at start of COLUMNS array appears at front",
+        steps: [
+          "Save a state with existing columns",
+          "Add a new column as the first entry in COLUMNS array",
+          "Reload"
+        ],
+        expect: "New column appears at the leftmost position. All other columns retain their user order."
+      },
+      {
+        id: "CO-05", badge: "critical", title: "New column added at end of COLUMNS array appears at end",
+        steps: [
+          "Save a state with existing columns",
+          "Add a new column as the last entry in COLUMNS array",
+          "Reload"
+        ],
+        expect: "New column appears at the rightmost position. All other columns retain their user order."
+      },
+      {
+        id: "CO-06", badge: "critical", title: "Removed column disappears without disrupting remaining order",
+        steps: [
+          "Save a state with N columns",
+          "Remove one column from COLUMNS array in code",
+          "Reload"
+        ],
+        expect: "Removed column is gone. All remaining columns stay in their user-defined order."
+      },
+      {
+        id: "CO-07", badge: "edge", title: "All columns removed from code — grid falls back to defaults",
+        steps: [
+          "Save state normally",
+          "Remove ALL columns from COLUMNS array",
+          "Reload"
+        ],
+        expect: "Grid renders with no columns and no JS error"
+      }
+    ]
+  },
+  {
+    title: "Column Visibility — Save & Restore",
+    color: "#d29922",
+    cases: [
+      {
+        id: "CV-01", badge: "happy", title: "Hidden column is saved and restored as hidden",
+        steps: [
+          "Right-click a column header → hide column (or use column panel)",
+          "Wait 600ms",
+          "Reload page"
+        ],
+        expect: "Column is hidden after reload. Grid does not show it."
+      },
+      {
+        id: "CV-02", badge: "happy", title: "Showing a previously hidden column is saved and restored",
+        steps: [
+          "Open column panel, make a hidden column visible",
+          "Wait 600ms",
+          "Reload page"
+        ],
+        expect: "Column is visible after reload"
+      },
+      {
+        id: "CV-03", badge: "critical", title: "New column with defaultVisible: false is hidden for existing users",
+        steps: [
+          "Save existing state",
+          "Add new column to COLUMNS with defaultVisible: false",
+          "Reload"
+        ],
+        expect: "New column is hidden. Existing column visibility preferences are unchanged."
+      },
+      {
+        id: "CV-04", badge: "critical", title: "New column with defaultVisible: true is visible for existing users",
+        steps: [
+          "Save existing state",
+          "Add new column to COLUMNS with no defaultVisible (defaults to true)",
+          "Reload"
+        ],
+        expect: "New column is visible. Existing column visibility preferences are unchanged."
+      }
+    ]
+  },
+  {
+    title: "Column Sizing — Save & Restore",
+    color: "#ffa657",
+    cases: [
+      {
+        id: "CS-01", badge: "happy", title: "Column resize is saved and restored",
+        steps: [
+          "Drag a column border to resize it",
+          "Wait 600ms",
+          "Reload page"
+        ],
+        expect: "Column appears at the resized width after reload"
+      },
+      {
+        id: "CS-02", badge: "happy", title: "Multiple column resizes are all restored",
+        steps: [
+          "Resize three different columns to distinct widths",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "All three columns restore to their individually resized widths"
+      },
+      {
+        id: "CS-03", badge: "edge", title: "New column without defaultWidth falls back gracefully",
+        steps: [
+          "Add a new column to COLUMNS with no defaultWidth set",
+          "Reload"
+        ],
+        expect: "Column renders without error using AG Grid's internal default width"
+      }
+    ]
+  },
+  {
+    title: "Column Pinning — Save & Restore",
+    color: "#bc8cff",
+    cases: [
+      {
+        id: "CP-01", badge: "happy", title: "Left-pinned column is restored as left-pinned",
+        steps: [
+          "Right-click a column → Pin → Pin Left",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Column is pinned to the left after reload"
+      },
+      {
+        id: "CP-02", badge: "happy", title: "Right-pinned column is restored as right-pinned",
+        steps: [
+          "Right-click a column → Pin → Pin Right",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Column is pinned to the right after reload"
+      },
+      {
+        id: "CP-03", badge: "happy", title: "Unpinning a column is saved and restored",
+        steps: [
+          "Unpin a previously pinned column",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Column is not pinned after reload"
+      }
+    ]
+  },
+  {
+    title: "Sort — Save & Restore",
+    color: "#58a6ff",
+    cases: [
+      {
+        id: "SO-01", badge: "happy", title: "Single column sort asc is saved and restored",
+        steps: [
+          "Click a column header once to sort ascending",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Column shows ascending sort indicator after reload. Rows are sorted."
+      },
+      {
+        id: "SO-02", badge: "happy", title: "Single column sort desc is saved and restored",
+        steps: [
+          "Click a column header twice to sort descending",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Column shows descending sort indicator after reload"
+      },
+      {
+        id: "SO-03", badge: "happy", title: "Multi-column sort order and directions are restored",
+        steps: [
+          "Hold Shift and click multiple column headers to create multi-sort",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "All sorted columns restore with correct directions and correct sortIndex order"
+      },
+      {
+        id: "SO-04", badge: "happy", title: "Clearing sort is saved",
+        steps: [
+          "Click a sorted column header until sort is cleared",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Column has no sort indicator after reload. Rows in default order."
+      }
+    ]
+  },
+  {
+    title: "Filter — Save & Restore",
+    color: "#3fb950",
+    cases: [
+      {
+        id: "FI-01", badge: "happy", title: "Text filter on a column is saved and restored",
+        steps: [
+          "Open column filter, enter a text filter value",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Filter is active after reload. Only matching rows are shown."
+      },
+      {
+        id: "FI-02", badge: "happy", title: "Number filter is saved and restored",
+        steps: [
+          "Apply a number filter (e.g. greater than X)",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Number filter is active after reload with correct operator and value"
+      },
+      {
+        id: "FI-03", badge: "happy", title: "Multiple column filters are all restored",
+        steps: [
+          "Apply filters on two different columns",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Both filters are active after reload"
+      },
+      {
+        id: "FI-04", badge: "critical", title: "Clearing all filters is saved — no filters restored on reload",
+        steps: [
+          "Apply a filter then clear it using the grid's clear filter option",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "No filters are active after reload. All rows visible."
+      },
+      {
+        id: "FI-05", badge: "critical", title: "Filter on a removed column does not cause errors on reload",
+        steps: [
+          "Apply a filter on column X",
+          "Remove column X from COLUMNS array in code",
+          "Reload"
+        ],
+        expect: "No JS error. Removed column's filter is silently discarded. Other filters intact."
+      },
+      {
+        id: "FI-06", badge: "edge", title: "localStorage has corrupted filter JSON — grid loads cleanly",
+        steps: [
+          "Open DevTools → Application → localStorage",
+          "Manually corrupt the userFilters value (e.g. set to invalid JSON)",
+          "Reload"
+        ],
+        expect: "Grid loads with no filters and no JS error. Falls back to clean state."
+      }
+    ]
+  },
+  {
+    title: "Row Group — Save & Restore",
+    color: "#ffa657",
+    cases: [
+      {
+        id: "RG-01", badge: "happy", title: "Single row group is saved and restored",
+        steps: [
+          "Drag a column to the row group drop zone",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Grid loads with the same row grouping active"
+      },
+      {
+        id: "RG-02", badge: "happy", title: "Multi-level row group order is restored correctly",
+        steps: [
+          "Create a two-level row group (drag two columns in order)",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Both groups restore with the correct parent-child grouping order"
+      },
+      {
+        id: "RG-03", badge: "happy", title: "Removing a row group is saved and not restored",
+        steps: [
+          "Remove a column from the row group drop zone",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Grid loads with no row grouping for that column"
+      }
+    ]
+  },
+  {
+    title: "Scroll Position — Save & Restore",
+    color: "#bc8cff",
+    cases: [
+      {
+        id: "SC-01", badge: "happy", title: "Vertical scroll position is restored on reload",
+        steps: [
+          "Load grid with many rows",
+          "Scroll down significantly",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Grid viewport is scrolled to approximately the same vertical position"
+      },
+      {
+        id: "SC-02", badge: "happy", title: "Horizontal scroll position is restored on reload",
+        steps: [
+          "Load grid with many columns",
+          "Scroll right",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Grid viewport is scrolled to approximately the same horizontal position"
+      },
+      {
+        id: "SC-03", badge: "edge", title: "Scroll position of 0,0 does not cause errors",
+        steps: [
+          "Keep grid scrolled to the top-left",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Grid loads at top-left with no errors"
+      },
+      {
+        id: "SC-04", badge: "edge", title: "Saved scroll position beyond current row count does not error",
+        steps: [
+          "Scroll to bottom with 1000 rows loaded",
+          "Reload page with only 10 rows loaded (simulating filtered data)",
+          "Observe scroll position"
+        ],
+        expect: "Grid loads without error. Scrolls to the furthest available position."
+      }
+    ]
+  },
+  {
+    title: "Row Selection — Save & Restore",
+    color: "#58a6ff",
+    cases: [
+      {
+        id: "RS-01", badge: "happy", title: "Selected row is restored on reload",
+        steps: [
+          "Click a row to select it",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "Same row is highlighted as selected after reload"
+      },
+      {
+        id: "RS-02", badge: "happy", title: "Multiple selected rows are all restored",
+        steps: [
+          "Ctrl+Click multiple rows to multi-select",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "All previously selected rows are restored as selected"
+      },
+      {
+        id: "RS-03", badge: "happy", title: "Deselecting all rows is saved correctly",
+        steps: [
+          "Select a row then deselect it (click again or press Escape)",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "No rows are selected after reload"
+      },
+      {
+        id: "RS-04", badge: "critical", title: "Selected row ID no longer exists in row data — no error",
+        steps: [
+          "Select row with ID = 42",
+          "Remove that row from the data source",
+          "Reload"
+        ],
+        expect: "Grid loads without error. No row is selected. No JS exception."
+      },
+      {
+        id: "RS-05", badge: "edge", title: "rowIdField not defined — selection is not saved or restored",
+        steps: [
+          "Remove rowIdField from the schema",
+          "Select a row",
+          "Wait 600ms",
+          "Reload"
+        ],
+        expect: "No row is selected after reload. No errors. selectedRowIds is empty array in localStorage."
+      }
+    ]
+  },
+  {
+    title: "Parent-Child Filter Interaction",
+    color: "#bc8cff",
+    cases: [
+      {
+        id: "PC-01", badge: "parent", title: "Child grid shows all rows when no parent row is selected on load",
+        steps: [
+          "Reload page with no parent row selected",
+          "Observe child grid"
+        ],
+        expect: "Child grid shows all rows unfiltered"
+      },
+      {
+        id: "PC-02", badge: "parent", title: "Selecting a parent row filters child grid correctly",
+        steps: [
+          "Select a row in the parent grid",
+          "Observe child grid"
+        ],
+        expect: "Child grid shows only rows matching the selected parent row's ID"
+      },
+      {
+        id: "PC-03", badge: "critical", title: "Parent-driven filter colId is NOT saved to localStorage",
+        steps: [
+          "Select a parent row (child gets filtered by accountId)",
+          "Wait 600ms",
+          "Inspect child grid's localStorage entry"
+        ],
+        expect: "userFilters in localStorage does NOT contain the accountId key"
+      },
+      {
+        id: "PC-04", badge: "critical", title: "Reloading child grid does not restore stale parent filter",
+        steps: [
+          "Select parent row A, child filters for A",
+          "Reload page without selecting any parent row",
+          "Observe child grid"
+        ],
+        expect: "Child grid shows ALL rows — no residual accountId filter from previous session"
+      },
+      {
+        id: "PC-05", badge: "critical", title: "User filters on child grid are preserved when parent row changes",
+        steps: [
+          "Apply a status filter on child grid",
+          "Select parent row A — child now shows filtered rows for A with status filter",
+          "Select parent row B",
+          "Observe child grid filters"
+        ],
+        expect: "Status filter remains active. Only accountId filter changes to row B's value."
+      },
+      {
+        id: "PC-06", badge: "critical", title: "User filters on child grid survive page reload and parent re-selection",
+        steps: [
+          "Apply a status = 'OPEN' filter on child grid",
+          "Select parent row, wait 600ms",
+          "Reload page",
+          "Select the same parent row again"
+        ],
+        expect: "status = OPEN filter is restored from localStorage. Parent filter layers on top correctly."
+      },
+      {
+        id: "PC-07", badge: "parent", title: "Deselecting parent row removes parent filter, keeps user filters",
+        steps: [
+          "Select a parent row — child is filtered",
+          "Apply an additional user filter on child (e.g. status filter)",
+          "Deselect the parent row",
+          "Observe child grid"
+        ],
+        expect: "accountId filter is removed. status filter remains. All accounts' rows matching status are shown."
+      },
+      {
+        id: "PC-08", badge: "edge", title: "Old localStorage state with filters key (pre-fix) loads without error",
+        steps: [
+          "Manually set a localStorage entry using old format: { filters: { status: {...} } } (no userFilters key)",
+          "Reload page"
+        ],
+        expect: "Grid reads filters as userFilters via backward-compat fallback. No JS error."
+      }
+    ]
+  },
+  {
+    title: "Reset Layout",
+    color: "#f85149",
+    cases: [
+      {
+        id: "RL-01", badge: "happy", title: "Reset Layout button clears all user preferences",
+        steps: [
+          "Customise column order, widths, filters, sort",
+          "Click Reset Layout button",
+          "Observe grid"
+        ],
+        expect: "Grid reverts to default column order, widths, visibility. All filters and sorts cleared."
+      },
+      {
+        id: "RL-02", badge: "happy", title: "localStorage is cleared after Reset Layout",
+        steps: [
+          "Click Reset Layout",
+          "Inspect localStorage"
+        ],
+        expect: "Key grid_state__{gridId} is removed, then immediately re-written with default state"
+      },
+      {
+        id: "RL-03", badge: "happy", title: "After Reset Layout, next reload shows defaults",
+        steps: [
+          "Click Reset Layout",
+          "Hard-reload page"
+        ],
+        expect: "Grid renders with COLUMNS defaults — no user preferences applied"
+      },
+      {
+        id: "RL-04", badge: "edge", title: "Reset Layout on child grid clears user filters but not parent filter",
+        steps: [
+          "Select a parent row (child is filtered)",
+          "Apply extra user filters on child",
+          "Click Reset Layout on child grid"
+        ],
+        expect: "User filters are cleared. Parent-driven filter is re-applied by the parent selection event."
+      }
+    ]
+  },
+  {
+    title: "Schema Version & Backward Compatibility",
+    color: "#d29922",
+    cases: [
+      {
+        id: "SV-01", badge: "critical", title: "Bumping schemaVersion resets all users to defaults",
+        steps: [
+          "Save state with schemaVersion: 1",
+          "Change schemaVersion to 2 in the component schema",
+          "Reload"
+        ],
+        expect: "Grid loads with default column layout. Old saved state is ignored. New state saved with version 2."
+      },
+      {
+        id: "SV-02", badge: "edge", title: "Corrupted JSON in localStorage falls back to defaults",
+        steps: [
+          "Open DevTools → Application → localStorage",
+          "Set the grid's key to { not valid json at all",
+          "Reload"
+        ],
+        expect: "Grid loads with defaults. No JS error. Fresh state is saved to localStorage."
+      },
+      {
+        id: "SV-03", badge: "edge", title: "Empty string in localStorage falls back to defaults",
+        steps: [
+          "Set the grid's localStorage key to an empty string",
+          "Reload"
+        ],
+        expect: "Grid loads with defaults. No error."
+      },
+      {
+        id: "SV-04", badge: "edge", title: "localStorage quota exceeded — grid still works",
+        steps: [
+          "Fill localStorage to capacity using another key",
+          "Interact with the grid to trigger a save",
+          "Reload"
+        ],
+        expect: "Grid renders and functions correctly even if save silently fails. No uncaught JS error."
+      }
+    ]
+  }
+];
+
+// ── Render ──────────────────────────────────────────────────────────────────
+
+const main = document.getElementById('main');
+let totalCount = 0, criticalCount = 0, edgeCount = 0;
+
+SECTIONS.forEach((sec, si) => {
+  totalCount += sec.cases.length;
+  criticalCount += sec.cases.filter(c => c.badge === 'critical').length;
+  edgeCount += sec.cases.filter(c => c.badge === 'edge').length;
+
+  const secEl = document.createElement('div');
+  secEl.className = 'section';
+  secEl.id = `sec-${si}`;
+
+  const hdr = document.createElement('div');
+  hdr.className = 'section-header';
+  hdr.innerHTML = `
+    <div class="section-num" style="background:${sec.color}">${si + 1}</div>
+    <div class="section-title">${sec.title}</div>
+    <div class="section-count">${sec.cases.length} tests</div>
+    <div class="chevron">▼</div>
+  `;
+  hdr.addEventListener('click', () => secEl.classList.toggle('collapsed'));
+
+  const body = document.createElement('div');
+  body.className = 'section-body';
+
+  sec.cases.forEach(tc => {
+    const badgeMap = {
+      happy: ['badge-happy', 'HAPPY PATH'],
+      critical: ['badge-critical', 'CRITICAL'],
+      edge: ['badge-edge', 'EDGE CASE'],
+      parent: ['badge-parent', 'PARENT-CHILD'],
+    };
+    const [bClass, bLabel] = badgeMap[tc.badge] || ['badge-happy', 'HAPPY PATH'];
+
+    const stepsHtml = tc.steps.map((s, i) =>
+      `<div class="step"><div class="step-n">${i + 1}</div><span>${s}</span></div>`
+    ).join('');
+
+    const row = document.createElement('div');
+    row.className = 'tc';
+    row.dataset.id = tc.id;
+    row.innerHTML = `
+      <input type="checkbox" class="tc-check" id="chk-${tc.id}" />
+      <div class="tc-body">
+        <div class="tc-top">
+          <span class="tc-id">${tc.id}</span>
+          <span class="tc-title">${tc.title}</span>
+          <span class="badge ${bClass}">${bLabel}</span>
+        </div>
+        <div class="tc-steps">${stepsHtml}</div>
+        <div class="expect">${tc.expect}</div>
+      </div>
+    `;
+
+    const chk = row.querySelector('input');
+    const saved = localStorage.getItem(`qa-${tc.id}`);
+    if (saved === '1') { chk.checked = true; row.classList.add('done'); }
+
+    chk.addEventListener('change', () => {
+      localStorage.setItem(`qa-${tc.id}`, chk.checked ? '1' : '0');
+      row.classList.toggle('done', chk.checked);
+      updateProgress();
+    });
+
+    body.appendChild(row);
+  });
+
+  secEl.appendChild(hdr);
+  secEl.appendChild(body);
+  main.appendChild(secEl);
+});
+
+// ── Stats ────────────────────────────────────────────────────────────────────
+document.getElementById('stat-total').textContent = totalCount;
+document.getElementById('stat-critical').textContent = criticalCount;
+document.getElementById('stat-edge').textContent = edgeCount;
+document.getElementById('prog-label').textContent = `0 / ${totalCount}`;
+document.getElementById('footer-date').textContent = new Date().toISOString().slice(0, 10);
+
+function updateProgress() {
+  const all = document.querySelectorAll('.tc-check');
+  const done = [...all].filter(c => c.checked).length;
+  document.getElementById('stat-done').textContent = done;
+  document.getElementById('prog-label').textContent = `${done} / ${totalCount}`;
+  document.getElementById('prog-bar').style.width = `${(done / totalCount) * 100}%`;
+}
+
+function expandAll()   { document.querySelectorAll('.section').forEach(s => s.classList.remove('collapsed')); }
+function collapseAll() { document.querySelectorAll('.section').forEach(s => s.classList.add('collapsed')); }
+function resetAll() {
+  if (!confirm('Reset all checkboxes?')) return;
+  document.querySelectorAll('.tc-check').forEach(c => {
+    c.checked = false;
+    c.closest('.tc').classList.remove('done');
+    localStorage.removeItem(`qa-${c.id.replace('chk-', '')}`);
+  });
+  updateProgress();
+}
+
+updateProgress();
+</script>
+</body>
+</html>
