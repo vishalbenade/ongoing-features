@@ -46,6 +46,44 @@ export class GridStateService {
 
   // ── Restore scroll — call this from (firstDataRendered) event ────────────
   // firstDataRendered fires after rows are in the DOM, so scrollTo works.
+// grid-state.service.ts
+
+// Add this private method
+private sanitizeFilterModel(
+  filterModel: Record<string, any>
+): Record<string, any> {
+  const result: Record<string, any> = {};
+
+  for (const [colId, model] of Object.entries(filterModel)) {
+    if (!model) continue;                          // skip null/undefined
+
+    // Multi-filter — AG Grid wraps sub-filters in filterModels array
+    if (model.filterType === 'multi') {
+      const activeSubFilters = (model.filterModels as any[])
+        .filter(sub => {
+          if (!sub) return false;                  // strip null sub-filters
+          if (sub.filterType === 'set' &&
+             Array.isArray(sub.values) &&
+             sub.values.length === 0) return false; // strip empty set
+          return true;
+        });
+
+      if (activeSubFilters.length === 0) continue; // whole filter is empty — skip
+
+      result[colId] = { ...model, filterModels: activeSubFilters };
+      continue;
+    }
+
+    // Set filter — skip if values array is empty
+    if (model.filterType === 'set') {
+      if (Array.isArray(model.values) && model.values.length === 0) continue;
+    }
+
+    result[colId] = model;
+  }
+
+  return result;
+}
 
   restoreScroll(api: GridApi, schema: GridSchema, hostElement: HTMLElement): void {
     const persisted = this.load(schema.gridId);
