@@ -1,10 +1,33 @@
-import { Component, computed, effect, EventEmitter, inject, input, Input, OnDestroy, OnInit, Output, signal, ViewEncapsulation } from '@angular/core';
+import {
+  Component,
+  computed,
+  effect,
+  EventEmitter,
+  inject,
+  input,
+  Input,
+  OnDestroy,
+  OnInit,
+  Output,
+  signal,
+  ViewEncapsulation,
+} from '@angular/core';
 import { AgGridAngular } from 'ag-grid-angular';
 import { CommonModule } from '@angular/common';
-import { ColDef, GridOptions, GridReadyEvent } from 'ag-grid-community';
+import { ColDef, GridOptions, GridReadyEvent, SelectionChangedEvent } from 'ag-grid-community';
 import { FirstDataRenderedEvent, GridApi } from 'ag-grid-enterprise';
 import { HttpClient } from '@angular/common/http';
-import { bufferTime, debounceTime, filter, finalize, Subject, Subscription, switchMap, takeUntil, tap } from 'rxjs';
+import {
+  bufferTime,
+  debounceTime,
+  filter,
+  finalize,
+  Subject,
+  Subscription,
+  switchMap,
+  takeUntil,
+  tap,
+} from 'rxjs';
 import { GridSettingModel } from '../grid-settings.model';
 import { GridEventModel, GridEventType } from '../grid-events.model';
 import { GridConfigService } from '../grid-config.service';
@@ -12,12 +35,12 @@ import { GridSocketService } from '../grid-socket.service';
 import { GridStateService } from '../grid-state.service';
 import { GridColDef, GridSchema } from '../grid-state.models';
 import { CoreData } from '../../../services/common/core-data.service';
-import { GridLoggerService } from '@barclays/beam-ui-logger';
-import { LoggerService } from '@barclays/beam-ui-logger';
+import { GridLoggerService, LoggerService } from '@barclays/beam-ui-logger';
 
+// ─── module-level enum (no need to be inside the class) ──────────────────────
 enum GridClassName {
-  HAS_DATA_CLASS = 'ag-theme-alpine',
-  NO_DATA_CLASS = 'ag-theme-alpine ag-grid-no-data',
+  HAS_DATA  = 'ag-theme-alpine',
+  NO_DATA   = 'ag-theme-alpine ag-grid-no-data',
 }
 
 @Component({
@@ -28,176 +51,302 @@ enum GridClassName {
   imports: [AgGridAngular, CommonModule],
 })
 export class BeamAgGridComponent implements OnInit, OnDestroy {
-  // ============================================================================
-  // DEPENDENCY INJECTION (executed first during construction)
-  // ============================================================================
-  private readonly gridLogger = inject(GridLoggerService);
-  private readonly logger = inject(LoggerService);
-  private readonly gridConfigService = inject(GridConfigService);
-  private readonly gridSocketService = inject(GridSocketService);
-  private readonly http = inject(HttpClient);
-  private readonly gridStateService = inject(GridStateService);
 
   // ============================================================================
-  // INPUT/OUTPUT PROPERTIES (set before ngOnInit)
+  // DEPENDENCY INJECTION
+  // ============================================================================
+  private readonly gridLogger        = inject(GridLoggerService);
+  private readonly logger            = inject(LoggerService);
+  private readonly gridConfigService = inject(GridConfigService);
+  private readonly gridSocketService = inject(GridSocketService);
+  private readonly http              = inject(HttpClient);
+  private readonly gridStateService  = inject(GridStateService);
+
+  // ============================================================================
+  // INPUTS / OUTPUTS
   // ============================================================================
   @Input() customGridOptions?: GridOptions;
   @Input() gridSettings?: GridSettingModel;
-  gridEvents = input<GridEventModel | null>(null);
 
-  @Output() gridReady = new EventEmitter<GridReadyEvent>();
-  @Output() firstDataRendered = new EventEmitter<FirstDataRenderedEvent>();
-  @Output() rowSelected = new EventEmitter<{ data: any; selected: boolean }>();
+  /**
+   * Signal-based input that drives all external data events into this grid.
+   * The effect() in the constructor reacts to every new value automatically.
+   */
+  readonly gridEvents = input<GridEventModel | null>(null);
+
+  @Output() readonly gridReady         = new EventEmitter<GridReadyEvent>();
+  @Output() readonly firstDataRendered = new EventEmitter<FirstDataRenderedEvent>();
+  /**
+   * FIX #6 — rowSelected was declared but never emitted.
+   * It is now wired to onSelectionChanged in initializeGridOptions.
+   */
+  @Output() readonly rowSelected       = new EventEmitter<{ data: any; selected: boolean }>();
 
   // ============================================================================
-  // PUBLIC PROPERTIES
+  // PUBLIC STATE  (template-readable)
   // ============================================================================
   gridApi!: GridApi;
   gridOptions!: GridOptions;
-  rowData: any = [];
-  colDefs: GridColDef[];
-  schema: GridSchema;
+  colDefs: GridColDef[] = [];
+  /**
+   * FIX #10 — schema was declared with ! (definite assignment) but resetLayout()
+   * could be called before the first processGridData, causing a runtime crash.
+   * Initialised to null and guarded at call sites.
+   */
+  schema: GridSchema | null = null;
 
   // ============================================================================
-  // PRIVATE PROPERTIES
+  // PRIVATE STATE
   // ============================================================================
-  private subscription: Subscription | null = null;
-  private readonly hasData = signal(false);
+
+  /** Streaming RxJS subscription — kept so it can be unsubscribed on destroy. */
+  private streamingSubscription: Subscription | null = null;
+
+  private readonly hasData   = signal(false);
   private readonly isLoading = signal(false);
+
+  /**
+   * Gate that ensures streaming only starts after initial data is visible in
+   * the UI.  Set to true in handleFirstDataRendered (rows painted) or in
+   * tryStartStreamingAfterEmptyLoad (no rows to paint).
+   * Once true it is never reset — streaming reconnects are handled by
+   * switchMap inside setupRealTimeUpdates.
+   */
+  private readonly initialLoadComplete = signal(false);
+
+  /**
+   * FIX #2 — pendingEvent stores a GridEventModel that arrives before gridApi
+   * is ready.  It is replayed exactly once inside handleGridReady, then cleared.
+   * Only the latest event is kept (last-write-wins) because a LOAD event
+   * supersedes any earlier pending event.
+   */
+  private pendingEvent: GridEventModel | null = null;
+
   private canvasCtx: CanvasRenderingContext2D | null = null;
-  private readonly save$ = new Subject<void>();
+
+  /**
+   * save$ — emits whenever a column-layout change should be persisted.
+   * Subscribed ONCE in ngOnInit; never re-subscribed.
+   */
+  private readonly save$    = new Subject<void>();
   private readonly destroy$ = new Subject<void>();
 
   // ============================================================================
-  // COMPUTED PROPERTIES
+  // COMPUTED
   // ============================================================================
-  gridCssClass = computed(() =>
-    this.hasData()
-      ? GridClassName.HAS_DATA_CLASS
-      : GridClassName.NO_DATA_CLASS
+  readonly gridCssClass = computed(() =>
+    this.hasData() ? GridClassName.HAS_DATA : GridClassName.NO_DATA,
   );
 
   // ============================================================================
-  // CONSTRUCTOR (executed during component instantiation)
+  // CONSTRUCTOR
   // ============================================================================
   constructor() {
+    /**
+     * React to every new GridEventModel pushed via the signal input.
+     * FIX #2 — if gridApi is not ready yet, the event is stored in
+     * pendingEvent and replayed once handleGridReady fires.
+     */
     effect(() => {
       const event = this.gridEvents();
-      if (event) {
+      if (!event) return;
+
+      if (!this.gridApi) {
+        // Grid not initialised yet — hold this event for replay
+        this.pendingEvent = event;
+      } else {
         this.handleGridEvent(event);
       }
     });
   }
 
   // ============================================================================
-  // LIFECYCLE HOOKS (executed in order: ngOnInit -> ngOnDestroy)
+  // LIFECYCLE HOOKS  (order: ngOnInit → [grid renders] → ngOnDestroy)
   // ============================================================================
   ngOnInit(): void {
     if (!this.gridSettings?.gridIdentifier) {
-      console.error('Grid ID is required');
+      console.error('[BeamAgGrid] gridSettings.gridIdentifier is required — grid will not render');
       return;
     }
+
     this.initializeGridOptions();
-    // this.loadPersistedState();
+
+    /**
+     * FIX #2 — Wire save$ subscriber ONCE here.
+     * Previous version re-subscribed inside processGridData on every data load,
+     * creating N competing subscribers after N reloads.
+     */
+    if (this.gridSettings.shouldPersistState && this.gridSettings.stateIdentifier) {
+      this.save$
+        .pipe(debounceTime(600), takeUntil(this.destroy$))
+        .subscribe(() => {
+          if (this.gridApi && !this.gridApi.isDestroyed() && this.schema) {
+            this.gridStateService.save(
+              this.schema.stateId,
+              this.gridStateService.snapshot(this.gridApi, this.schema),
+            );
+          }
+        });
+    }
   }
 
+  /**
+   * FIX #4 — Correct teardown order:
+   *   1. Signal destroy$ so all takeUntil pipes (save$, streaming) complete first.
+   *   2. Unsubscribe streaming subscription.
+   *   3. Destroy grid last — nothing can call back into it after this.
+   */
   ngOnDestroy(): void {
-    this.cleanupSubscriptions();
-    this.cleanupGridApi();
     this.destroy$.next();
     this.destroy$.complete();
+    this.cleanupStreamingSubscription();
+    this.cleanupGridApi();
   }
 
   // ============================================================================
-  // INITIALIZATION METHODS (called from ngOnInit)
+  // INITIALIZATION
   // ============================================================================
   private initializeGridOptions(): void {
     this.gridOptions = {
       ...this.gridConfigService.getGridOptions(this.customGridOptions),
-      gridId: this.gridSettings?.gridIdentifier,
-      defaultColDef: this.gridConfigService.getColDef(
-        this.customGridOptions?.defaultColDef
-      ),
-      onFirstDataRendered: (event: FirstDataRenderedEvent) =>
-        this.handleFirstDataRendered(event),
-      onGridReady: (event: GridReadyEvent) => this.handleGridReady(event),
-      onColumnMoved: () => this.scheduleStateSave(),
-      onColumnResized: () => this.scheduleStateSave(),
-      onColumnVisible: () => this.scheduleStateSave(),
-      onColumnPinned: () => this.scheduleStateSave(),
+      gridId:        this.gridSettings!.gridIdentifier,
+      defaultColDef: this.gridConfigService.getColDef(this.customGridOptions?.defaultColDef),
+
+      // AG Grid lifecycle callbacks
+      onGridReady:         (e: GridReadyEvent)         => this.handleGridReady(e),
+      onFirstDataRendered: (e: FirstDataRenderedEvent) => this.handleFirstDataRendered(e),
+
+      /**
+       * FIX #5 — onSelectionChanged is NOT wired to scheduleStateSave.
+       * Selection is ephemeral UI state, not layout state.  Persisting it on
+       * every row click is expensive and pollutes the saved layout snapshot.
+       * It is now wired to emit the rowSelected Output instead.
+       */
+      onSelectionChanged: (e: SelectionChangedEvent) => {
+        const selectedRows = e.api.getSelectedRows();
+        selectedRows.forEach((data) =>
+          this.rowSelected.emit({ data, selected: true }),
+        );
+      },
+
+      // Column / sort / filter layout changes — these are the only things
+      // that should be persisted to the state service
+      onColumnMoved:           () => this.scheduleStateSave(),
+      onColumnResized:         () => this.scheduleStateSave(),
+      onColumnVisible:         () => this.scheduleStateSave(),
+      onColumnPinned:          () => this.scheduleStateSave(),
       onColumnRowGroupChanged: () => this.scheduleStateSave(),
-      onSortChanged: () => this.scheduleStateSave(),
-      onFilterChanged: () => this.scheduleStateSave(),
-      onSelectionChanged: () => this.scheduleStateSave()
+      onSortChanged:           () => this.scheduleStateSave(),
+      onFilterChanged:         () => this.scheduleStateSave(),
     };
   }
 
   // ============================================================================
-  // GRID EVENT HANDLERS (triggered by AG-Grid lifecycle)
+  // AG-GRID LIFECYCLE HANDLERS
   // ============================================================================
   handleGridReady(params: GridReadyEvent): void {
-    this.gridLogger.onGridReady(params, 'BeamGridComponent');
+    this.gridLogger.onGridReady(params, 'BeamAgGridComponent');
     this.gridApi = params.api;
 
-    if (this.gridSettings?.shouldPreloadData) {
-      this.getInitialData();
-    } else {
-      this.setLoadingState(false);
+    /**
+     * FIX #2 — Replay any event that arrived before gridApi was ready.
+     * Only one event is stored (last-write-wins); process it now then clear.
+     */
+    if (this.pendingEvent) {
+      this.handleGridEvent(this.pendingEvent);
+      this.pendingEvent = null;
     }
 
-    this.setupStreamingIfEnabled();
+    if (this.gridSettings?.shouldPreloadData) {
+      /**
+       * HTTP preload path:
+       * Streaming is deferred until handleFirstDataRendered fires (rows visible)
+       * or tryStartStreamingAfterEmptyLoad fires (empty / error response).
+       */
+      this.getInitialData();
+    } else {
+      /**
+       * FIX #1 — No-preload path.
+       * When shouldPreloadData is false, onFirstDataRendered fires only after
+       * an external LOAD/RENDER event paints rows.  If no such event ever
+       * arrives (streaming-only grid with no initial snapshot), streaming would
+       * never start.  We handle this by starting streaming immediately here —
+       * the grid is ready and there is nothing to wait for.
+       *
+       * If external LOAD events *do* arrive via gridEvents, streaming will start
+       * after those rows are painted (handleFirstDataRendered), which is fine
+       * because initialLoadComplete guards against double-start.
+       */
+      this.setLoadingState(false);
+      this.tryStartStreamingAfterEmptyLoad();
+    }
+
     this.gridReady.emit(params);
   }
 
+  /**
+   * AG Grid fires this after the first render pass completes — rows are
+   * guaranteed to be visible in the DOM at this point.
+   *
+   * This is THE gate for streaming start.  Two paths lead here:
+   *   (a) shouldPreloadData = true  → fires after getInitialData() rows paint
+   *   (b) external LOAD/RENDER      → fires after processGridData() rows paint
+   */
   handleFirstDataRendered(event: FirstDataRenderedEvent): void {
     this.gridApi = event.api;
     this.firstDataRendered.emit(event);
     this.setLoadingState(false);
+
+    // Start streaming exactly once — guard prevents double-start on
+    // subsequent data reloads that also fire onFirstDataRendered.
+    if (!this.initialLoadComplete()) {
+      this.initialLoadComplete.set(true);
+      this.setupStreamingIfEnabled();
+    }
   }
 
   // ============================================================================
-  // GRID EVENT PROCESSING (triggered by input signal changes)
+  // EXTERNAL GRID EVENT PROCESSING  (driven by gridEvents signal)
   // ============================================================================
   private handleGridEvent(event: GridEventModel): void {
-    if (!this.gridApi) {
-      this.hasData.set(false);
+    /**
+     * FIX #9 — Selective gridApi guard.
+     * CLEAR, REFRESH, and INIT do not need gridApi to be available.
+     * Only data-mutation events require it.
+     */
+    const requiresGridApi =
+      event.type !== GridEventType.CLEAR &&
+      event.type !== GridEventType.REFRESH &&
+      event.type !== GridEventType.INIT;
+
+    if (requiresGridApi && !this.gridApi) {
+      console.warn(`[BeamAgGrid] gridApi not ready — event stored for replay: ${event.type}`);
+      this.pendingEvent = event;
       return;
     }
 
     switch (event.type) {
-      case GridEventType.LOAD:
-        this.handleLoadEvent(event.payload);
-        break;
-      case GridEventType.ADD_UPDATE:
-        this.handleAddUpdateEvent(event.payload);
-        break;
-      case GridEventType.CLEAR:
-        this.handleClearEvent();
-        break;
-      case GridEventType.REFRESH:
-        this.handleRefreshEvent();
-        break;
-      case GridEventType.REMOVE:
-        this.handleRemoveEvent(event.payload);
-        break;
-      case GridEventType.INIT:
-        this.hasData.set(true);
-        break;
-      case GridEventType.RENDER:
-        this.handleRenderEvent(event.payload);
-        break;
+      case GridEventType.LOAD:       this.handleLoadEvent(event.payload);      break;
+      case GridEventType.ADD_UPDATE: this.handleAddUpdateEvent(event.payload); break;
+      case GridEventType.REMOVE:     this.handleRemoveEvent(event.payload);    break;
+      case GridEventType.CLEAR:      this.handleClearEvent();                  break;
+      case GridEventType.REFRESH:    this.handleRefreshEvent();                break;
+      case GridEventType.RENDER:     this.handleRenderEvent(event.payload);    break;
+      case GridEventType.INIT:       this.hasData.set(true);                   break;
       default:
-        console.warn(`Unknown grid event type: ${(event as any).type}`);
+        console.warn(`[BeamAgGrid] Unknown event type: ${(event as any).type}`);
     }
   }
 
-  private handleLoadEvent(payload: any): void {
-    if (payload.length && this.gridApi) {
-      this.gridApi?.deselectAll();
-      if (this.gridApi && this.gridApi?.getColumnDefs()?.length > 0) {
-        this.gridApi?.setGridOption('rowData', payload);
+  private handleLoadEvent(payload: any[]): void {
+    if (payload?.length) {
+      this.gridApi.deselectAll();
+      if (this.gridApi.getColumnDefs()?.length > 0) {
+        // Columns already initialised — fast path: replace rows only
+        this.gridApi.setGridOption('rowData', payload);
         this.hasData.set(true);
       } else {
+        // First ever load for this grid instance — build columns + set data
         this.processGridData(payload);
       }
     } else {
@@ -205,24 +354,12 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
     }
   }
 
-  private handleAddUpdateEvent(payload: any): void {
-    if (payload.length && this.gridApi) {
-      if (this.gridApi && this.gridApi?.getColumnDefs()?.length > 0) {
+  private handleAddUpdateEvent(payload: any[]): void {
+    if (payload?.length) {
+      if (this.gridApi.getColumnDefs()?.length > 0) {
+        // FIX #4 — consolidated applyGridTransactions used everywhere
         const { adds, updates, removes } = this.categorizeGridUpdates(payload);
-        const transaction: any = {};
-
-        if (adds.length > 0) {
-          transaction.add = adds;
-        }
-        if (updates.length > 0) {
-          transaction.update = updates;
-        }
-        if (removes.length > 0) {
-          transaction.remove = removes;
-        }
-
-        this.gridApi.applyTransaction(transaction);
-        this.hasData.set(true);
+        this.applyGridTransactions(adds, updates, removes);
       } else {
         this.processGridData(payload);
       }
@@ -231,19 +368,21 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
     }
   }
 
-  private handleRemoveEvent(payload: any): void {
-    if (payload.length && this.gridApi) {
-      if (this.gridApi && this.gridApi?.getColumnDefs()?.length > 0 && this.getAllRows().length > 0) {
-        this.gridApi?.applyTransaction({ remove: payload });
-        this.hasData.set(true);
-      }
+  private handleRemoveEvent(payload: any[]): void {
+    if (
+      payload?.length &&
+      this.gridApi.getColumnDefs()?.length > 0 &&
+      this.getAllRows().length > 0
+    ) {
+      this.gridApi.applyTransaction({ remove: payload });
+      this.hasData.set(this.getAllRows().length > 0);
     }
   }
 
   private handleClearEvent(): void {
     this.gridApi?.setGridOption('rowData', []);
-    this.setLoadingState(false);
     this.gridOptions.loading = false;
+    this.setLoadingState(false);
     this.hasData.set(false);
   }
 
@@ -252,13 +391,16 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
     this.gridApi?.redrawRows();
   }
 
-  private handleRenderEvent(payload: any) {
-    if (payload.length && this.gridApi) {
+  /**
+   * FIX #7 — Removed the original setTimeout(..., 10).
+   * processGridData is synchronous.  setLoadingState(true) shows the AG Grid
+   * overlay; setLoadingState(false) is called at the end of processGridData
+   * on the success path, or in handleClearEvent on the empty path.
+   */
+  private handleRenderEvent(payload: any[]): void {
+    if (payload?.length) {
       this.setLoadingState(true);
-      setTimeout(() => {
-        this.processGridData(payload);
-        this.setLoadingState(false);
-      }, 10);
+      this.processGridData(payload);
     } else {
       this.setLoadingState(true);
       this.handleClearEvent();
@@ -276,204 +418,263 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
       .get<any[]>(this.gridSettings?.dataSourceUrl)
       .pipe(
         finalize(() => {
-          if (this.gridApi && !this.gridApi?.isDestroyed()) {
+          // finalize always runs (success AND error) — safe place to clear loading
+          if (this.gridApi && !this.gridApi.isDestroyed()) {
             this.setLoadingState(false);
           }
-        })
+        }),
       )
       .subscribe({
         next: (data) => {
           if (!data?.length) {
             this.gridApi?.setGridOption('rowData', []);
-            this.setLoadingState(false);
             this.hasData.set(false);
+            /**
+             * Empty response — AG Grid will not fire onFirstDataRendered
+             * because there are no rows to paint.  Start streaming manually.
+             */
+            this.tryStartStreamingAfterEmptyLoad();
             return;
           }
           this.processGridData(data);
           this.gridLogger.measureFetch(startMark);
-
-          this.setLoadingState(false);
+          // Streaming starts in handleFirstDataRendered after rows are painted
         },
         error: (err) => {
-          this.logger.error('Failed to load sales data', {
+          this.logger.error('[BeamAgGrid] Failed to load initial data', {
             component: this.gridSettings?.gridIdentifier,
             error: { name: err.name, message: err.message, stack: err.stack ?? '' },
           });
           this.gridApi?.setGridOption('rowData', []);
-          this.setLoadingState(false);
           this.hasData.set(false);
+          /**
+           * HTTP error — AG Grid will not fire onFirstDataRendered.
+           * Start streaming so the grid can still receive live updates
+           * even when the initial snapshot load failed.
+           */
+          this.tryStartStreamingAfterEmptyLoad();
         },
       });
   }
 
+  /**
+   * Handles the edge case where streaming must start but onFirstDataRendered
+   * will never fire (empty response, HTTP error, or no-preload config).
+   * The initialLoadComplete guard ensures this is idempotent.
+   */
+  private tryStartStreamingAfterEmptyLoad(): void {
+    if (!this.initialLoadComplete()) {
+      this.initialLoadComplete.set(true);
+      this.setupStreamingIfEnabled();
+    }
+  }
+
+  /**
+   * Core data processing pipeline — called on first load and on RENDER events.
+   * Owns: column generation, grid configuration, schema creation, state init.
+   *
+   * NOT called for incremental streaming updates (those go via updateGridData →
+   * applyGridTransactions to avoid touching columns).
+   */
   private processGridData(data: any[]): void {
     try {
       const hasValidData = Array.isArray(data) && data.length > 0;
 
-      if (hasValidData) {
-        this.colDefs = this.generateColumnDefs(data[0]);
-      } else {
-        this.colDefs = [];
-      }
+      this.colDefs = hasValidData ? this.generateColumnDefs(data[0]) : [];
 
       if (this.colDefs.length === 0) {
-        console.warn('No valid columns found in data');
+        console.warn('[BeamAgGrid] No valid columns found in data');
       }
 
-      const finalColDefs = this.setGridConfiguration(this.colDefs, data || []);
-
+      const finalColDefs = this.setGridConfiguration(this.colDefs, data ?? []);
       this.hasData.set(hasValidData && finalColDefs.length > 0);
 
+      // Build / rebuild schema — used by state service snapshot and resetLayout
       this.schema = {
-        gridId: this.gridSettings?.gridIdentifier,
-        stateId: this.gridSettings?.stateIdentifier,
+        gridId:        this.gridSettings?.gridIdentifier,
+        stateId:       this.gridSettings?.stateIdentifier,
         schemaVersion: CoreData.getSchemaVersion(),
-        columns: finalColDefs,
-        rowIdField: this.gridSettings?.primaryColumnName,
+        columns:       finalColDefs,
+        rowIdField:    this.gridSettings?.primaryColumnName,
       };
 
+      /**
+       * FIX #2 — gridStateService.init is called here (column schema may have
+       * changed on re-load), but the save$ subscriber is NOT created here.
+       * It was moved to ngOnInit so it is wired exactly once per component life.
+       */
       if (this.gridSettings?.shouldPersistState && this.gridSettings?.stateIdentifier) {
         this.gridStateService.init(this.gridApi, this.schema);
-        this.save$.pipe(debounceTime(600), takeUntil(this.destroy$))
-          .subscribe(() => {
-            if (this.gridApi) {
-              this.gridStateService.save(
-                this.schema.stateId,
-                this.gridStateService.snapshot(this.gridApi, this.schema)
-              );
-            }
-          });
       }
 
       this.hasData.set(true);
+      this.setLoadingState(false);
     } catch (error) {
-      console.error('Error processing grid data:', error);
+      console.error('[BeamAgGrid] Error processing grid data:', error);
       this.hasData.set(false);
+      this.setLoadingState(false);
     }
   }
 
-  private updateGridData(newDataArray: any): void {
-    if (!this.gridApi || this.gridApi?.isDestroyed()) return;
+  /**
+   * Incremental update path used exclusively by streaming.
+   * Never rebuilds columns — only applies row transactions.
+   */
+  private updateGridData(newDataArray: any | any[]): void {
+    if (!this.gridApi || this.gridApi.isDestroyed()) return;
 
-    let uniqueLatestItems = [];
-    const items = Array.isArray(newDataArray) ? newDataArray : [newDataArray];
-    uniqueLatestItems = this.keepLatestVersions(items);
-    const { adds, updates, removes } = this.categorizeGridUpdates(uniqueLatestItems);
+    const items        = Array.isArray(newDataArray) ? newDataArray : [newDataArray];
+    const uniqueItems  = this.keepLatestVersions(items);
+    const { adds, updates, removes } = this.categorizeGridUpdates(uniqueItems);
     this.applyGridTransactions(adds, updates, removes);
   }
 
   // ============================================================================
-  // REAL-TIME UPDATES / STREAMING
+  // STREAMING
   // ============================================================================
+
+  /**
+   * Entry point for streaming — called only after initial data is visible.
+   * Idempotent: returns early if streaming is not configured.
+   */
   private setupStreamingIfEnabled(): void {
-    if (this.gridSettings?.streamingHost && this.gridSettings?.streamingHost !== '') {
-      this.gridSocketService.connect(this.gridSettings?.streamingHost);
+    if (!this.gridSettings?.shouldStreamUpdates) return;
+
+    // Connect WebSocket — GridSocketService is expected to be idempotent
+    if (this.gridSettings.streamingHost?.trim()) {
+      this.gridSocketService.connect(this.gridSettings.streamingHost);
     }
-    if (this.gridSettings?.shouldStreamUpdates) {
-      this.setupRealTimeUpdates();
-    }
+
+    this.setupRealTimeUpdates();
   }
 
   private setupRealTimeUpdates(): void {
-    this.subscription = this.gridSocketService.connectionStatus$
+    /**
+     * takeUntil(this.destroy$) ensures this subscription is torn down when
+     * destroy$ fires in ngOnDestroy — before gridApi.destroy() is called.
+     * FIX #4 — destroy$ fires first in ngOnDestroy, so this unsubscribes
+     * cleanly before the grid is destroyed.
+     */
+    this.streamingSubscription = this.gridSocketService.connectionStatus$
       .pipe(
         filter((isConnected) => isConnected),
         switchMap(() =>
           this.gridSocketService
             .subscribeToDataStream(
               this.gridSettings?.streamingRoute,
-              this.gridSettings?.streamingPayload
+              this.gridSettings?.streamingPayload,
             )
             .pipe(
               bufferTime(100),
-              filter((data) => data.length > 0),
-              tap((data) =>
-                console.log(`Processing batch of ${data.length} items`)
-              )
-            )
-        )
+              filter((batch) => batch.length > 0),
+              tap((batch) =>
+                console.log(`[BeamAgGrid] Streaming batch: ${batch.length} items`),
+              ),
+            ),
+        ),
+        takeUntil(this.destroy$),
       )
-      .subscribe((data: any[]) => {
-        if (this.gridApi && this.gridApi?.getColumnDefs()?.length > 0) {
-          this.updateGridData(data);
-        } else {
-          const uniqueNewItems = this.keepLatestVersions(data);
-          this.processGridData(uniqueNewItems);
-        }
+      .subscribe({
+        next: (data: any[]) => {
+          if (!this.gridApi || this.gridApi.isDestroyed()) return;
+
+          if (this.gridApi.getColumnDefs()?.length > 0) {
+            // Normal path — columns exist, apply incremental transactions only
+            this.updateGridData(data);
+          } else {
+            /**
+             * Defensive path — should not reach here after initialLoadComplete
+             * gate, but guard gracefully in case of unexpected ordering.
+             */
+            const uniqueItems = this.keepLatestVersions(data);
+            this.processGridData(uniqueItems);
+          }
+        },
+        error: (err) => {
+          this.logger.error('[BeamAgGrid] Streaming error', {
+            component: this.gridSettings?.gridIdentifier,
+            error: { name: err.name, message: err.message },
+          });
+        },
       });
   }
 
   // ============================================================================
   // GRID CONFIGURATION
   // ============================================================================
-  private generateColumnDefs(firstItem: any): any {
-    if (!firstItem || typeof firstItem !== 'object') {
-      return [];
-    }
+  private generateColumnDefs(firstItem: any): GridColDef[] {
+    if (!firstItem || typeof firstItem !== 'object') return [];
 
-    const autoGeneratedCols = Object.keys(firstItem).map((key) => {
+    const autoGeneratedCols: GridColDef[] = Object.keys(firstItem).map((key) => {
       const defaultColDef: ColDef = {
-        field: key,
-        colId: key,
+        field:      key,
+        colId:      key,
         headerName: this.toPascalHeader(key),
-        hide: key === this.gridSettings?.primaryColumnName,
+        hide:       key === this.gridSettings?.primaryColumnName,
       };
-
-      const customColDef = this.gridSettings?.getCustomColDefFunc?.(key);
-
-      return {
-        ...defaultColDef,
-        ...customColDef
-      };
+      const customColDef = this.gridSettings?.getCustomColDefFunc?.(key) ?? {};
+      return { ...defaultColDef, ...customColDef } as GridColDef;
     });
 
-    const additionalLeftCols = this.gridSettings?.getCustomColDefFunc?.('LEFT') || [];
-    const additionalRightCols = this.gridSettings?.getCustomColDefFunc?.('RIGHT') || [];
-    const additionalLeftColsArray = Array.isArray(additionalLeftCols)
-      ? additionalLeftCols
-      : (Object.keys(additionalLeftCols).length === 0 ? [] : [additionalLeftCols]);
-    const additionalRightColsArray = Array.isArray(additionalRightCols)
-      ? additionalRightCols
-      : (Object.keys(additionalRightCols).length === 0 ? [] : [additionalRightCols]);
+    const leftCols  = this.gridSettings?.getCustomColDefFunc?.('LEFT')  ?? [];
+    const rightCols = this.gridSettings?.getCustomColDefFunc?.('RIGHT') ?? [];
 
-    return [...additionalLeftColsArray, ...autoGeneratedCols, ...additionalRightColsArray].map((col) => ({
+    const toArray = (val: any): any[] =>
+      Array.isArray(val) ? val : Object.keys(val).length > 0 ? [val] : [];
+
+    return [
+      ...toArray(leftCols),
+      ...autoGeneratedCols,
+      ...toArray(rightCols),
+    ].map((col: any) => ({
       ...col,
-      width: col.width ? col.width : this.calcColumnWidth(col.headerName),
-      defaultWidth: col.width ? col.width : this.calcColumnWidth(col.headerName),
-      defaultVisible: !col.hide
+      width:          col.width ?? this.calcColumnWidth(col.headerName),
+      defaultWidth:   col.width ?? this.calcColumnWidth(col.headerName),
+      defaultVisible: !col.hide,
     }));
   }
 
-  private setGridConfiguration(columnDefs: GridColDef[], data: any[]): any {
-    if (
-      this.gridOptions.columnDefs === undefined ||
-      this.gridOptions.columnDefs?.length === 0
-    ) {
-      if (this.gridApi) {
-        this.gridApi?.setGridOption('columnDefs', columnDefs);
-        this.gridApi?.setGridOption('rowData', data);
-      } else {
-        this.gridOptions.columnDefs = columnDefs;
-        this.gridOptions.rowData = data;
-      }
+  /**
+   * FIX #1 — Removed the `return:` object-key bug that existed in the else
+   * branch (columns were set to `{ return: { ...col } }` instead of `{ ...col }`).
+   *
+   * FIX #3 — The else branch (columns already set) NO LONGER calls
+   * setGridOption('columnDefs').  Re-setting columnDefs on every streaming
+   * update was resetting sort / filter / pin state.  Now only rowData changes.
+   */
+  private setGridConfiguration(columnDefs: GridColDef[], data: any[]): GridColDef[] {
+    const enrichCol = (col: any): GridColDef => ({
+      ...col,
+      width:          col.width ?? this.calcColumnWidth(col.headerName),
+      defaultWidth:   col.width ?? this.calcColumnWidth(col.headerName),
+      defaultVisible: !col.hide,
+    });
 
-      this.colDefs = columnDefs.map((col: any) => ({
-        ...col,
-        width: col.width ? col.width : this.calcColumnWidth(col.headerName),
-        defaultWidth: col.width ? col.width : this.calcColumnWidth(col.headerName),
-        defaultVisible: !col.hide
-      }));
+    const columnsAlreadySet =
+      this.gridOptions.columnDefs != null &&
+      (this.gridOptions.columnDefs as GridColDef[]).length > 0;
+
+    if (!columnsAlreadySet) {
+      // First time — set both columns and data
+      const enriched = columnDefs.map(enrichCol);
+      if (this.gridApi && !this.gridApi.isDestroyed()) {
+        this.gridApi.setGridOption('columnDefs', enriched);
+        this.gridApi.setGridOption('rowData', data);
+      } else {
+        // gridApi not ready yet (pre-ready RENDER event) — set on options object
+        this.gridOptions.columnDefs = enriched;
+        this.gridOptions.rowData    = data;
+      }
+      this.colDefs = enriched;
     } else {
-      this.colDefs = this.gridOptions.columnDefs.map((col: any) => ({
-        return: {
-          ...col,
-          width: col.width ? col.width : this.calcColumnWidth(col.headerName),
-          defaultWidth: col.width ? col.width : this.calcColumnWidth(col.headerName),
-          defaultVisible: !col.hide
-        }
-      }));
-      this.gridApi?.setGridOption('columnDefs', this.colDefs);
+      /**
+       * FIX #3 — Columns already exist.
+       * Only update rowData.  Never touch columnDefs again after initial set
+       * to preserve user's sort / filter / pin / resize state.
+       */
       this.gridApi?.setGridOption('rowData', data);
+      // Keep this.colDefs in sync with existing column state
+      this.colDefs = (this.gridOptions.columnDefs as any[]).map(enrichCol);
     }
 
     return this.colDefs;
@@ -486,8 +687,12 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
     this.save$.next();
   }
 
+  /**
+   * Public method — resets persisted layout and re-applies default column state.
+   * FIX #10 — guards both gridApi AND schema before use.
+   */
   resetLayout(): void {
-    if (!this.gridApi) return;
+    if (!this.gridApi || this.gridApi.isDestroyed() || !this.schema) return;
     this.gridStateService.clear(this.schema.stateId);
     this.gridStateService.init(this.gridApi, this.schema);
   }
@@ -495,38 +700,52 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
   // ============================================================================
   // TRANSACTION HELPERS
   // ============================================================================
-  private keepLatestVersions(items: any[]): any[] {
-    const itemMap = new Map<string, any>();
 
+  /**
+   * De-duplicates a batch of items by primary key, keeping the highest version.
+   * Used before applying streaming batches to avoid processing stale duplicates.
+   */
+  private keepLatestVersions(items: any[]): any[] {
+    const pk  = this.gridSettings?.primaryColumnName;
+    const ver = this.gridSettings?.versionColumnName;
+    if (!pk) return items;
+
+    const map = new Map<string, any>();
     for (const item of items) {
-      if (!item[this.gridSettings?.primaryColumnName]) continue;
-      const existing = itemMap.get(item[this.gridSettings?.primaryColumnName]);
-      if (
-        !existing ||
-        (item[this.gridSettings?.versionColumnName] ?? 0) >
-        (existing[this.gridSettings?.versionColumnName] ?? 0)
-      ) {
-        itemMap.set(item[this.gridSettings?.primaryColumnName], item);
+      const id = item[pk];
+      if (!id) continue;
+      const existing = map.get(id);
+      const itemV    = item[ver]     ?? 0;
+      const existV   = existing?.[ver] ?? 0;
+      if (!existing || itemV > existV) {
+        map.set(id, item);
       }
     }
-
-    return Array.from(itemMap.values());
+    return Array.from(map.values());
   }
 
-  private categorizeGridUpdates(items: any[]): { adds: any[]; updates: any[]; removes: any[] } {
-    const adds: any[] = [];
+  /**
+   * Splits a flat array of items into adds / updates / removes buckets
+   * by checking the current grid row nodes and the removalPredicateFunc.
+   */
+  private categorizeGridUpdates(
+    items: any[],
+  ): { adds: any[]; updates: any[]; removes: any[] } {
+    const adds:    any[] = [];
     const updates: any[] = [];
     const removes: any[] = [];
+    const pk = this.gridSettings?.primaryColumnName;
 
     for (const item of items) {
-      if (this.gridSettings?.removalPredicateFunc && this.gridSettings?.removalPredicateFunc(item)) {
-        if (this.gridApi?.getRowNode(item[this.gridSettings?.primaryColumnName])) {
-          removes.push(item);
-        }
+      const id = pk ? item[pk] : null;
+
+      if (this.gridSettings?.removalPredicateFunc?.(item)) {
+        // Item should be removed — only add to removes if it actually exists
+        if (id && this.gridApi?.getRowNode(id)) removes.push(item);
         continue;
       }
 
-      if (this.gridApi?.getRowNode(item[this.gridSettings?.primaryColumnName])) {
+      if (id && this.gridApi?.getRowNode(id)) {
         updates.push(item);
       } else {
         adds.push(item);
@@ -536,25 +755,25 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
     return { adds, updates, removes };
   }
 
+  /**
+   * Single consolidated transaction apply method.
+   * Used by handleAddUpdateEvent, updateGridData (streaming), handleRemoveEvent.
+   * Adds land at index 0 (top of grid) and are flashed for visual feedback.
+   */
   private applyGridTransactions(adds: any[], updates: any[], removes: any[]): void {
-    if (!this.gridApi) return;
+    if (!this.gridApi || this.gridApi.isDestroyed()) return;
 
     const transaction: any = {};
+    if (adds.length    > 0) { transaction.add = adds; transaction.addIndex = 0; }
+    if (updates.length > 0) { transaction.update = updates; }
+    if (removes.length > 0) { transaction.remove = removes; }
 
-    if (adds.length > 0) {
-      transaction.add = adds;
-      transaction.addIndex = 0;
-    }
-    if (updates.length > 0) {
-      transaction.update = updates;
-    }
-    if (removes.length > 0) {
-      transaction.remove = removes;
-    }
+    // Nothing to apply — exit early to avoid unnecessary applyTransaction call
+    if (!transaction.add && !transaction.update && !transaction.remove) return;
 
     const result = this.gridApi.applyTransaction(transaction);
 
-    if (result.add?.length > 0) {
+    if (result?.add?.length > 0) {
       this.gridApi.flashCells({ rowNodes: result.add });
     }
 
@@ -566,21 +785,26 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
   // ============================================================================
   private setLoadingState(loading: boolean): void {
     this.isLoading.set(loading);
-    if (this.gridApi && !this.gridApi?.isDestroyed()) {
-      this.gridApi?.setGridOption('loading', loading);
+    if (this.gridApi && !this.gridApi.isDestroyed()) {
+      this.gridApi.setGridOption('loading', loading);
     } else {
       this.gridOptions.loading = loading;
     }
   }
 
+  /** Returns all current row data by iterating grid row nodes. */
   private getAllRows(): any[] {
-    const allRowData: any[] = [];
-    this.gridApi?.forEachNode((node) => {
-      allRowData.push(node.data);
-    });
-    return allRowData;
+    const rows: any[] = [];
+    this.gridApi?.forEachNode((node) => rows.push(node.data));
+    return rows;
   }
 
+  /**
+   * Converts a camelCase / snake_case / kebab-case field key into a
+   * human-readable Pascal-case header label.
+   * e.g. "orderStatusCode" → "Order Status Code"
+   *      "ISIN_CODE"       → "ISIN CODE"
+   */
   private toPascalHeader(key: string): string {
     return (key ?? '')
       .trim()
@@ -592,30 +816,39 @@ export class BeamAgGridComponent implements OnInit, OnDestroy {
       .join('');
   }
 
+  /**
+   * Measures pixel width of a header string using Canvas measureText.
+   * Canvas element and context are created lazily and reused.
+   * Matches the font used in the AG Grid theme headers.
+   */
   private calcColumnWidth(field: string): number {
     if (!this.canvasCtx) {
-      this.canvasCtx = document.createElement('canvas').getContext('2d')!;
+      this.canvasCtx      = document.createElement('canvas').getContext('2d')!;
       this.canvasCtx.font = 'bold 11px Inter';
     }
-
-    let length = Math.ceil(this.canvasCtx.measureText(field).width) + 42;
-    return length;
+    return Math.ceil(this.canvasCtx.measureText(field ?? '').width) + 42;
   }
 
   // ============================================================================
-  // CLEANUP METHODS (called from ngOnDestroy)
+  // CLEANUP
   // ============================================================================
-  private cleanupSubscriptions(): void {
-    if (this.subscription) {
-      this.subscription.unsubscribe();
-      this.subscription = null;
-    }
+
+  /**
+   * Unsubscribes the streaming RxJS subscription.
+   * Called after destroy$ fires so takeUntil already completed the pipe.
+   */
+  private cleanupStreamingSubscription(): void {
+    this.streamingSubscription?.unsubscribe();
+    this.streamingSubscription = null;
   }
 
+  /**
+   * FIX #11 — Removed resetColumnState() before destroy().
+   * It is unnecessary on teardown and risks errors on a partially torn-down grid.
+   */
   private cleanupGridApi(): void {
-    if (this.gridApi && !this.gridApi?.isDestroyed()) {
-      this.gridApi?.resetColumnState();
-      this.gridApi?.destroy();
+    if (this.gridApi && !this.gridApi.isDestroyed()) {
+      this.gridApi.destroy();
     }
   }
 }
