@@ -1,0 +1,621 @@
+import { Component, computed, effect, EventEmitter, inject, input, Input, OnDestroy, OnInit, Output, signal, ViewEncapsulation } from '@angular/core';
+import { AgGridAngular } from 'ag-grid-angular';
+import { CommonModule } from '@angular/common';
+import { ColDef, GridOptions, GridReadyEvent } from 'ag-grid-community';
+import { FirstDataRenderedEvent, GridApi } from 'ag-grid-enterprise';
+import { HttpClient } from '@angular/common/http';
+import { bufferTime, debounceTime, filter, finalize, Subject, Subscription, switchMap, takeUntil, tap } from 'rxjs';
+import { GridSettingModel } from '../grid-settings.model';
+import { GridEventModel, GridEventType } from '../grid-events.model';
+import { GridConfigService } from '../grid-config.service';
+import { GridSocketService } from '../grid-socket.service';
+import { GridStateService } from '../grid-state.service';
+import { GridColDef, GridSchema } from '../grid-state.models';
+import { CoreData } from '../../../services/common/core-data.service';
+import { GridLoggerService } from '@barclays/beam-ui-logger';
+import { LoggerService } from '@barclays/beam-ui-logger';
+
+enum GridClassName {
+  HAS_DATA_CLASS = 'ag-theme-alpine',
+  NO_DATA_CLASS = 'ag-theme-alpine ag-grid-no-data',
+}
+
+@Component({
+  selector: 'beam-ag-grid',
+  templateUrl: './beam-ag-grid.component.html',
+  styleUrl: './beam-ag-grid.component.scss',
+  encapsulation: ViewEncapsulation.None,
+  imports: [AgGridAngular, CommonModule],
+})
+export class BeamAgGridComponent implements OnInit, OnDestroy {
+  // ============================================================================
+  // DEPENDENCY INJECTION (executed first during construction)
+  // ============================================================================
+  private readonly gridLogger = inject(GridLoggerService);
+  private readonly logger = inject(LoggerService);
+  private readonly gridConfigService = inject(GridConfigService);
+  private readonly gridSocketService = inject(GridSocketService);
+  private readonly http = inject(HttpClient);
+  private readonly gridStateService = inject(GridStateService);
+
+  // ============================================================================
+  // INPUT/OUTPUT PROPERTIES (set before ngOnInit)
+  // ============================================================================
+  @Input() customGridOptions?: GridOptions;
+  @Input() gridSettings?: GridSettingModel;
+  gridEvents = input<GridEventModel | null>(null);
+
+  @Output() gridReady = new EventEmitter<GridReadyEvent>();
+  @Output() firstDataRendered = new EventEmitter<FirstDataRenderedEvent>();
+  @Output() rowSelected = new EventEmitter<{ data: any; selected: boolean }>();
+
+  // ============================================================================
+  // PUBLIC PROPERTIES
+  // ============================================================================
+  gridApi!: GridApi;
+  gridOptions!: GridOptions;
+  rowData: any = [];
+  colDefs: GridColDef[];
+  schema: GridSchema;
+
+  // ============================================================================
+  // PRIVATE PROPERTIES
+  // ============================================================================
+  private subscription: Subscription | null = null;
+  private readonly hasData = signal(false);
+  private readonly isLoading = signal(false);
+  private canvasCtx: CanvasRenderingContext2D | null = null;
+  private readonly save$ = new Subject<void>();
+  private readonly destroy$ = new Subject<void>();
+
+  // ============================================================================
+  // COMPUTED PROPERTIES
+  // ============================================================================
+  gridCssClass = computed(() =>
+    this.hasData()
+      ? GridClassName.HAS_DATA_CLASS
+      : GridClassName.NO_DATA_CLASS
+  );
+
+  // ============================================================================
+  // CONSTRUCTOR (executed during component instantiation)
+  // ============================================================================
+  constructor() {
+    effect(() => {
+      const event = this.gridEvents();
+      if (event) {
+        this.handleGridEvent(event);
+      }
+    });
+  }
+
+  // ============================================================================
+  // LIFECYCLE HOOKS (executed in order: ngOnInit -> ngOnDestroy)
+  // ============================================================================
+  ngOnInit(): void {
+    if (!this.gridSettings?.gridIdentifier) {
+      console.error('Grid ID is required');
+      return;
+    }
+    this.initializeGridOptions();
+    // this.loadPersistedState();
+  }
+
+  ngOnDestroy(): void {
+    this.cleanupSubscriptions();
+    this.cleanupGridApi();
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
+  // ============================================================================
+  // INITIALIZATION METHODS (called from ngOnInit)
+  // ============================================================================
+  private initializeGridOptions(): void {
+    this.gridOptions = {
+      ...this.gridConfigService.getGridOptions(this.customGridOptions),
+      gridId: this.gridSettings?.gridIdentifier,
+      defaultColDef: this.gridConfigService.getColDef(
+        this.customGridOptions?.defaultColDef
+      ),
+      onFirstDataRendered: (event: FirstDataRenderedEvent) =>
+        this.handleFirstDataRendered(event),
+      onGridReady: (event: GridReadyEvent) => this.handleGridReady(event),
+      onColumnMoved: () => this.scheduleStateSave(),
+      onColumnResized: () => this.scheduleStateSave(),
+      onColumnVisible: () => this.scheduleStateSave(),
+      onColumnPinned: () => this.scheduleStateSave(),
+      onColumnRowGroupChanged: () => this.scheduleStateSave(),
+      onSortChanged: () => this.scheduleStateSave(),
+      onFilterChanged: () => this.scheduleStateSave(),
+      onSelectionChanged: () => this.scheduleStateSave()
+    };
+  }
+
+  // ============================================================================
+  // GRID EVENT HANDLERS (triggered by AG-Grid lifecycle)
+  // ============================================================================
+  handleGridReady(params: GridReadyEvent): void {
+    this.gridLogger.onGridReady(params, 'BeamGridComponent');
+    this.gridApi = params.api;
+
+    if (this.gridSettings?.shouldPreloadData) {
+      this.getInitialData();
+    } else {
+      this.setLoadingState(false);
+    }
+
+    this.setupStreamingIfEnabled();
+    this.gridReady.emit(params);
+  }
+
+  handleFirstDataRendered(event: FirstDataRenderedEvent): void {
+    this.gridApi = event.api;
+    this.firstDataRendered.emit(event);
+    this.setLoadingState(false);
+  }
+
+  // ============================================================================
+  // GRID EVENT PROCESSING (triggered by input signal changes)
+  // ============================================================================
+  private handleGridEvent(event: GridEventModel): void {
+    if (!this.gridApi) {
+      this.hasData.set(false);
+      return;
+    }
+
+    switch (event.type) {
+      case GridEventType.LOAD:
+        this.handleLoadEvent(event.payload);
+        break;
+      case GridEventType.ADD_UPDATE:
+        this.handleAddUpdateEvent(event.payload);
+        break;
+      case GridEventType.CLEAR:
+        this.handleClearEvent();
+        break;
+      case GridEventType.REFRESH:
+        this.handleRefreshEvent();
+        break;
+      case GridEventType.REMOVE:
+        this.handleRemoveEvent(event.payload);
+        break;
+      case GridEventType.INIT:
+        this.hasData.set(true);
+        break;
+      case GridEventType.RENDER:
+        this.handleRenderEvent(event.payload);
+        break;
+      default:
+        console.warn(`Unknown grid event type: ${(event as any).type}`);
+    }
+  }
+
+  private handleLoadEvent(payload: any): void {
+    if (payload.length && this.gridApi) {
+      this.gridApi?.deselectAll();
+      if (this.gridApi && this.gridApi?.getColumnDefs()?.length > 0) {
+        this.gridApi?.setGridOption('rowData', payload);
+        this.hasData.set(true);
+      } else {
+        this.processGridData(payload);
+      }
+    } else {
+      this.handleClearEvent();
+    }
+  }
+
+  private handleAddUpdateEvent(payload: any): void {
+    if (payload.length && this.gridApi) {
+      if (this.gridApi && this.gridApi?.getColumnDefs()?.length > 0) {
+        const { adds, updates, removes } = this.categorizeGridUpdates(payload);
+        const transaction: any = {};
+
+        if (adds.length > 0) {
+          transaction.add = adds;
+        }
+        if (updates.length > 0) {
+          transaction.update = updates;
+        }
+        if (removes.length > 0) {
+          transaction.remove = removes;
+        }
+
+        this.gridApi.applyTransaction(transaction);
+        this.hasData.set(true);
+      } else {
+        this.processGridData(payload);
+      }
+    } else {
+      this.handleClearEvent();
+    }
+  }
+
+  private handleRemoveEvent(payload: any): void {
+    if (payload.length && this.gridApi) {
+      if (this.gridApi && this.gridApi?.getColumnDefs()?.length > 0 && this.getAllRows().length > 0) {
+        this.gridApi?.applyTransaction({ remove: payload });
+        this.hasData.set(true);
+      }
+    }
+  }
+
+  private handleClearEvent(): void {
+    this.gridApi?.setGridOption('rowData', []);
+    this.setLoadingState(false);
+    this.gridOptions.loading = false;
+    this.hasData.set(false);
+  }
+
+  private handleRefreshEvent(): void {
+    this.gridApi?.refreshCells();
+    this.gridApi?.redrawRows();
+  }
+
+  private handleRenderEvent(payload: any) {
+    if (payload.length && this.gridApi) {
+      this.setLoadingState(true);
+      setTimeout(() => {
+        this.processGridData(payload);
+        this.setLoadingState(false);
+      }, 10);
+    } else {
+      this.setLoadingState(true);
+      this.handleClearEvent();
+    }
+  }
+
+  // ============================================================================
+  // DATA MANAGEMENT
+  // ============================================================================
+  private getInitialData(): void {
+    this.setLoadingState(true);
+    const startMark = this.gridLogger.markFetchStart();
+
+    this.http
+      .get<any[]>(this.gridSettings?.dataSourceUrl)
+      .pipe(
+        finalize(() => {
+          if (this.gridApi && !this.gridApi?.isDestroyed()) {
+            this.setLoadingState(false);
+          }
+        })
+      )
+      .subscribe({
+        next: (data) => {
+          if (!data?.length) {
+            this.gridApi?.setGridOption('rowData', []);
+            this.setLoadingState(false);
+            this.hasData.set(false);
+            return;
+          }
+          this.processGridData(data);
+          this.gridLogger.measureFetch(startMark);
+
+          this.setLoadingState(false);
+        },
+        error: (err) => {
+          this.logger.error('Failed to load sales data', {
+            component: this.gridSettings?.gridIdentifier,
+            error: { name: err.name, message: err.message, stack: err.stack ?? '' },
+          });
+          this.gridApi?.setGridOption('rowData', []);
+          this.setLoadingState(false);
+          this.hasData.set(false);
+        },
+      });
+  }
+
+  private processGridData(data: any[]): void {
+    try {
+      const hasValidData = Array.isArray(data) && data.length > 0;
+
+      if (hasValidData) {
+        this.colDefs = this.generateColumnDefs(data[0]);
+      } else {
+        this.colDefs = [];
+      }
+
+      if (this.colDefs.length === 0) {
+        console.warn('No valid columns found in data');
+      }
+
+      const finalColDefs = this.setGridConfiguration(this.colDefs, data || []);
+
+      this.hasData.set(hasValidData && finalColDefs.length > 0);
+
+      this.schema = {
+        gridId: this.gridSettings?.gridIdentifier,
+        stateId: this.gridSettings?.stateIdentifier,
+        schemaVersion: CoreData.getSchemaVersion(),
+        columns: finalColDefs,
+        rowIdField: this.gridSettings?.primaryColumnName,
+      };
+
+      if (this.gridSettings?.shouldPersistState && this.gridSettings?.stateIdentifier) {
+        this.gridStateService.init(this.gridApi, this.schema);
+        this.save$.pipe(debounceTime(600), takeUntil(this.destroy$))
+          .subscribe(() => {
+            if (this.gridApi) {
+              this.gridStateService.save(
+                this.schema.stateId,
+                this.gridStateService.snapshot(this.gridApi, this.schema)
+              );
+            }
+          });
+      }
+
+      this.hasData.set(true);
+    } catch (error) {
+      console.error('Error processing grid data:', error);
+      this.hasData.set(false);
+    }
+  }
+
+  private updateGridData(newDataArray: any): void {
+    if (!this.gridApi || this.gridApi?.isDestroyed()) return;
+
+    let uniqueLatestItems = [];
+    const items = Array.isArray(newDataArray) ? newDataArray : [newDataArray];
+    uniqueLatestItems = this.keepLatestVersions(items);
+    const { adds, updates, removes } = this.categorizeGridUpdates(uniqueLatestItems);
+    this.applyGridTransactions(adds, updates, removes);
+  }
+
+  // ============================================================================
+  // REAL-TIME UPDATES / STREAMING
+  // ============================================================================
+  private setupStreamingIfEnabled(): void {
+    if (this.gridSettings?.streamingHost && this.gridSettings?.streamingHost !== '') {
+      this.gridSocketService.connect(this.gridSettings?.streamingHost);
+    }
+    if (this.gridSettings?.shouldStreamUpdates) {
+      this.setupRealTimeUpdates();
+    }
+  }
+
+  private setupRealTimeUpdates(): void {
+    this.subscription = this.gridSocketService.connectionStatus$
+      .pipe(
+        filter((isConnected) => isConnected),
+        switchMap(() =>
+          this.gridSocketService
+            .subscribeToDataStream(
+              this.gridSettings?.streamingRoute,
+              this.gridSettings?.streamingPayload
+            )
+            .pipe(
+              bufferTime(100),
+              filter((data) => data.length > 0),
+              tap((data) =>
+                console.log(`Processing batch of ${data.length} items`)
+              )
+            )
+        )
+      )
+      .subscribe((data: any[]) => {
+        if (this.gridApi && this.gridApi?.getColumnDefs()?.length > 0) {
+          this.updateGridData(data);
+        } else {
+          const uniqueNewItems = this.keepLatestVersions(data);
+          this.processGridData(uniqueNewItems);
+        }
+      });
+  }
+
+  // ============================================================================
+  // GRID CONFIGURATION
+  // ============================================================================
+  private generateColumnDefs(firstItem: any): any {
+    if (!firstItem || typeof firstItem !== 'object') {
+      return [];
+    }
+
+    const autoGeneratedCols = Object.keys(firstItem).map((key) => {
+      const defaultColDef: ColDef = {
+        field: key,
+        colId: key,
+        headerName: this.toPascalHeader(key),
+        hide: key === this.gridSettings?.primaryColumnName,
+      };
+
+      const customColDef = this.gridSettings?.getCustomColDefFunc?.(key);
+
+      return {
+        ...defaultColDef,
+        ...customColDef
+      };
+    });
+
+    const additionalLeftCols = this.gridSettings?.getCustomColDefFunc?.('LEFT') || [];
+    const additionalRightCols = this.gridSettings?.getCustomColDefFunc?.('RIGHT') || [];
+    const additionalLeftColsArray = Array.isArray(additionalLeftCols)
+      ? additionalLeftCols
+      : (Object.keys(additionalLeftCols).length === 0 ? [] : [additionalLeftCols]);
+    const additionalRightColsArray = Array.isArray(additionalRightCols)
+      ? additionalRightCols
+      : (Object.keys(additionalRightCols).length === 0 ? [] : [additionalRightCols]);
+
+    return [...additionalLeftColsArray, ...autoGeneratedCols, ...additionalRightColsArray].map((col) => ({
+      ...col,
+      width: col.width ? col.width : this.calcColumnWidth(col.headerName),
+      defaultWidth: col.width ? col.width : this.calcColumnWidth(col.headerName),
+      defaultVisible: !col.hide
+    }));
+  }
+
+  private setGridConfiguration(columnDefs: GridColDef[], data: any[]): any {
+    if (
+      this.gridOptions.columnDefs === undefined ||
+      this.gridOptions.columnDefs?.length === 0
+    ) {
+      if (this.gridApi) {
+        this.gridApi?.setGridOption('columnDefs', columnDefs);
+        this.gridApi?.setGridOption('rowData', data);
+      } else {
+        this.gridOptions.columnDefs = columnDefs;
+        this.gridOptions.rowData = data;
+      }
+
+      this.colDefs = columnDefs.map((col: any) => ({
+        ...col,
+        width: col.width ? col.width : this.calcColumnWidth(col.headerName),
+        defaultWidth: col.width ? col.width : this.calcColumnWidth(col.headerName),
+        defaultVisible: !col.hide
+      }));
+    } else {
+      this.colDefs = this.gridOptions.columnDefs.map((col: any) => ({
+        return: {
+          ...col,
+          width: col.width ? col.width : this.calcColumnWidth(col.headerName),
+          defaultWidth: col.width ? col.width : this.calcColumnWidth(col.headerName),
+          defaultVisible: !col.hide
+        }
+      }));
+      this.gridApi?.setGridOption('columnDefs', this.colDefs);
+      this.gridApi?.setGridOption('rowData', data);
+    }
+
+    return this.colDefs;
+  }
+
+  // ============================================================================
+  // STATE MANAGEMENT
+  // ============================================================================
+  protected scheduleStateSave(): void {
+    this.save$.next();
+  }
+
+  resetLayout(): void {
+    if (!this.gridApi) return;
+    this.gridStateService.clear(this.schema.stateId);
+    this.gridStateService.init(this.gridApi, this.schema);
+  }
+
+  // ============================================================================
+  // TRANSACTION HELPERS
+  // ============================================================================
+  private keepLatestVersions(items: any[]): any[] {
+    const itemMap = new Map<string, any>();
+
+    for (const item of items) {
+      if (!item[this.gridSettings?.primaryColumnName]) continue;
+      const existing = itemMap.get(item[this.gridSettings?.primaryColumnName]);
+      if (
+        !existing ||
+        (item[this.gridSettings?.versionColumnName] ?? 0) >
+        (existing[this.gridSettings?.versionColumnName] ?? 0)
+      ) {
+        itemMap.set(item[this.gridSettings?.primaryColumnName], item);
+      }
+    }
+
+    return Array.from(itemMap.values());
+  }
+
+  private categorizeGridUpdates(items: any[]): { adds: any[]; updates: any[]; removes: any[] } {
+    const adds: any[] = [];
+    const updates: any[] = [];
+    const removes: any[] = [];
+
+    for (const item of items) {
+      if (this.gridSettings?.removalPredicateFunc && this.gridSettings?.removalPredicateFunc(item)) {
+        if (this.gridApi?.getRowNode(item[this.gridSettings?.primaryColumnName])) {
+          removes.push(item);
+        }
+        continue;
+      }
+
+      if (this.gridApi?.getRowNode(item[this.gridSettings?.primaryColumnName])) {
+        updates.push(item);
+      } else {
+        adds.push(item);
+      }
+    }
+
+    return { adds, updates, removes };
+  }
+
+  private applyGridTransactions(adds: any[], updates: any[], removes: any[]): void {
+    if (!this.gridApi) return;
+
+    const transaction: any = {};
+
+    if (adds.length > 0) {
+      transaction.add = adds;
+      transaction.addIndex = 0;
+    }
+    if (updates.length > 0) {
+      transaction.update = updates;
+    }
+    if (removes.length > 0) {
+      transaction.remove = removes;
+    }
+
+    const result = this.gridApi.applyTransaction(transaction);
+
+    if (result.add?.length > 0) {
+      this.gridApi.flashCells({ rowNodes: result.add });
+    }
+
+    this.hasData.set(this.getAllRows().length > 0);
+  }
+
+  // ============================================================================
+  // UTILITY METHODS
+  // ============================================================================
+  private setLoadingState(loading: boolean): void {
+    this.isLoading.set(loading);
+    if (this.gridApi && !this.gridApi?.isDestroyed()) {
+      this.gridApi?.setGridOption('loading', loading);
+    } else {
+      this.gridOptions.loading = loading;
+    }
+  }
+
+  private getAllRows(): any[] {
+    const allRowData: any[] = [];
+    this.gridApi?.forEachNode((node) => {
+      allRowData.push(node.data);
+    });
+    return allRowData;
+  }
+
+  private toPascalHeader(key: string): string {
+    return (key ?? '')
+      .trim()
+      .replace(/[_\-\s]+/g, ' ')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .split(' ')
+      .filter(Boolean)
+      .map((w) => (/^[A-Z0-9]+$/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+      .join('');
+  }
+
+  private calcColumnWidth(field: string): number {
+    if (!this.canvasCtx) {
+      this.canvasCtx = document.createElement('canvas').getContext('2d')!;
+      this.canvasCtx.font = 'bold 11px Inter';
+    }
+
+    let length = Math.ceil(this.canvasCtx.measureText(field).width) + 42;
+    return length;
+  }
+
+  // ============================================================================
+  // CLEANUP METHODS (called from ngOnDestroy)
+  // ============================================================================
+  private cleanupSubscriptions(): void {
+    if (this.subscription) {
+      this.subscription.unsubscribe();
+      this.subscription = null;
+    }
+  }
+
+  private cleanupGridApi(): void {
+    if (this.gridApi && !this.gridApi?.isDestroyed()) {
+      this.gridApi?.resetColumnState();
+      this.gridApi?.destroy();
+    }
+  }
+}
