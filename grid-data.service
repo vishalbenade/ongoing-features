@@ -1,0 +1,230 @@
+import { inject, Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Observable, of, Observer } from 'rxjs';
+
+/**
+ * GridDataService
+ *
+ * Owns ALL initial-snapshot HTTP transport for BeamAgGridComponent.
+ * The component never touches HttpClient or fetch() directly.
+ *
+ * Two fetch strategies are exposed, both returning Observable<any[]> so the
+ * component's subscription logic is identical regardless of mode:
+ *
+ *   fetchInitialData()         — standard buffered HTTP GET via Angular HttpClient
+ *   fetchInitialDataAsStream() — NDJSON chunked stream via Fetch Streams API
+ *
+ * Why fetch() for NDJSON and not HttpClient?
+ * ─────────────────────────────────────────────
+ * Angular's HttpClient buffers the complete response body before emitting a
+ * value.  There is no way to observe individual chunks mid-flight.
+ * The browser Fetch API exposes body as a ReadableStream, allowing us to
+ * process each newline-delimited JSON object the moment it arrives off the wire.
+ * This is the only reliable browser-native approach for NDJSON.
+ *
+ * Observable contract
+ * ─────────────────────
+ * Both methods emit individual rows one at a time via next(), then complete().
+ * The component accumulates rows and decides when to first render columns
+ * (FIRST_RENDER_THRESHOLD) and how to apply subsequent chunks via transactions.
+ *
+ * Error handling
+ * ─────────────────
+ * Both methods propagate errors through the Observable error channel so the
+ * component's single error handler covers both modes.
+ */
+@Injectable({ providedIn: 'root' })
+export class GridDataService {
+
+  private readonly http = inject(HttpClient);
+
+  // ── Standard buffered GET ──────────────────────────────────────────────────
+
+  /**
+   * Fetches the full initial dataset in a single buffered HTTP GET.
+   * Emits ONE next() with the complete array, then completes.
+   * Returns of([]) immediately when no URL is provided.
+   */
+  fetchInitialData(url: string | undefined): Observable<any[]> {
+    if (!url?.trim()) {
+      return of([]);
+    }
+    return this.http.get<any[]>(url);
+  }
+
+  // ── NDJSON chunked stream ──────────────────────────────────────────────────
+
+  /**
+   * Fetches an NDJSON stream from the given URL and emits each parsed row
+   * individually as it arrives off the wire.
+   *
+   * Expected server response:
+   *   Content-Type: application/x-ndjson   (or application/jsonlines)
+   *   Transfer-Encoding: chunked
+   *   Body: one JSON object per line, separated by \n
+   *
+   * Example body:
+   *   {"id":1,"symbol":"VOD.L","price":142.5}\n
+   *   {"id":2,"symbol":"BARC.L","price":183.2}\n
+   *   ...
+   *
+   * Observable behaviour:
+   *   - next(row)   emitted for every successfully parsed line
+   *   - error(err)  emitted on network failure, non-2xx status, or JSON parse error
+   *   - complete()  emitted when the server closes the stream
+   *
+   * Cancellation:
+   *   The underlying fetch is aborted via AbortController when the subscriber
+   *   unsubscribes (e.g. takeUntil(destroy$) fires on component destroy).
+   *   This prevents the browser from continuing to download a large stream
+   *   after the grid is torn down.
+   *
+   * @param url  NDJSON endpoint URL
+   */
+  fetchInitialDataAsStream(url: string | undefined): Observable<any> {
+    if (!url?.trim()) {
+      return of([]);
+    }
+
+    return new Observable((observer: Observer<any>) => {
+      // AbortController lets us cancel the fetch when the Observable is
+      // unsubscribed (component destroyed, route change, etc.)
+      const abortController = new AbortController();
+
+      this.readNdjsonStream(url, abortController.signal, observer);
+
+      // Teardown — called by RxJS when takeUntil fires or subscriber unsubscribes
+      return () => {
+        abortController.abort();
+      };
+    });
+  }
+
+  // ── Private NDJSON reader ──────────────────────────────────────────────────
+
+  /**
+   * Core NDJSON reader.  Separated from the Observable wrapper so it can be
+   * async without affecting the synchronous Observable constructor.
+   *
+   * Algorithm:
+   *   1. Open a fetch with the AbortSignal wired to our teardown.
+   *   2. Wrap the response body ReadableStream in a TextDecoderStream so we
+   *      work with strings rather than Uint8Array chunks.
+   *   3. Maintain a line buffer across chunk boundaries — a single network
+   *      chunk may contain partial lines or multiple lines.
+   *   4. For each complete line (terminated by \n), attempt JSON.parse.
+   *      Blank lines are skipped (common in NDJSON keep-alive heartbeats).
+   *   5. When the stream closes, flush any remaining buffered content.
+   *   6. Call observer.complete() so the component knows the snapshot is done.
+   *   7. On any error, call observer.error() with a descriptive Error object.
+   */
+  private async readNdjsonStream(
+    url: string,
+    signal: AbortSignal,
+    observer: Observer<any>,
+  ): Promise<void> {
+    try {
+      const response = await fetch(url, {
+        method:  'GET',
+        headers: { Accept: 'application/x-ndjson, application/jsonlines, */*' },
+        signal,
+      });
+
+      if (!response.ok) {
+        observer.error(
+          new Error(
+            `[GridDataService] NDJSON fetch failed — HTTP ${response.status} ${response.statusText} from ${url}`,
+          ),
+        );
+        return;
+      }
+
+      if (!response.body) {
+        // Server returned 2xx but no body — treat as empty dataset
+        observer.complete();
+        return;
+      }
+
+      // Pipe raw bytes through TextDecoderStream → UTF-8 string chunks
+      const reader = response.body
+        .pipeThrough(new TextDecoderStream())
+        .getReader();
+
+      // lineBuffer accumulates characters until we hit a newline.
+      // A network chunk is not guaranteed to be aligned to line boundaries.
+      let lineBuffer = '';
+
+      while (true) {
+        // Each read() call resolves with the next available chunk from the
+        // server.  On a chunked-transfer connection this typically arrives
+        // as fast as the server sends it.
+        const { done, value } = await reader.read();
+
+        if (done) {
+          // Stream closed — flush any remaining buffered content that did
+          // not end with a trailing newline (non-conformant but defensive)
+          const remaining = lineBuffer.trim();
+          if (remaining) {
+            this.parseLine(remaining, url, observer);
+          }
+          break;
+        }
+
+        // Append the new chunk to our buffer and split on newlines
+        lineBuffer += value;
+        const lines = lineBuffer.split('\n');
+
+        // All lines except the last are complete.
+        // The last element is either empty (line ended with \n — common) or
+        // a partial line that will be completed in the next chunk.
+        lineBuffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          // Skip blank lines — used as keep-alive heartbeats in some servers
+          if (trimmed) {
+            this.parseLine(trimmed, url, observer);
+          }
+        }
+
+        // Early exit if the subscriber has already unsubscribed (AbortSignal
+        // covers the fetch itself, but we also stop the read loop here)
+        if (signal.aborted) {
+          await reader.cancel();
+          return;
+        }
+      }
+
+      observer.complete();
+
+    } catch (error: any) {
+      // AbortError is not a real error — it means the subscriber unsubscribed.
+      // Swallow it silently; the Observable teardown has already handled cleanup.
+      if (error?.name === 'AbortError') {
+        return;
+      }
+      observer.error(
+        new Error(
+          `[GridDataService] NDJSON stream error from ${url}: ${error?.message ?? error}`,
+        ),
+      );
+    }
+  }
+
+  /**
+   * Attempts to JSON.parse a single NDJSON line and emit it to the observer.
+   * Emits observer.error() on malformed JSON so the component can handle it.
+   */
+  private parseLine(line: string, url: string, observer: Observer<any>): void {
+    try {
+      const parsed = JSON.parse(line);
+      observer.next(parsed);
+    } catch {
+      observer.error(
+        new Error(
+          `[GridDataService] Failed to parse NDJSON line from ${url}: ${line.substring(0, 120)}`,
+        ),
+      );
+    }
+  }
+}

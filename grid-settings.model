@@ -1,0 +1,107 @@
+/**
+ * GridSettingModel
+ *
+ * Central configuration contract for BeamAgGridComponent.
+ * All grid instances are driven by a single instance of this model passed
+ * via @Input() gridSettings.
+ *
+ * NEW FLAG — shouldPreloadStreamData
+ * ------------------------------------
+ * When true, the grid fetches its initial snapshot via HTTP NDJSON streaming
+ * instead of a standard buffered HTTP GET.  Rows are fed into the grid
+ * progressively as each newline-delimited JSON object is parsed off the wire.
+ *
+ * Decision matrix for initial data loading:
+ *
+ *   shouldPreloadData | shouldPreloadStreamData | Behaviour
+ *   ──────────────────┼────────────────────────┼──────────────────────────────
+ *         false       |         false          | No preload — streaming only
+ *         true        |         false          | Standard HTTP GET (buffered)
+ *         true        |         true           | HTTP NDJSON stream (chunked)
+ *         false       |         true           | Treated as no-preload (guard)
+ *
+ * NOTE: shouldPreloadStreamData has no effect unless shouldPreloadData is also
+ * true.  The component enforces this in getInitialData().
+ */
+export interface GridSettingModel {
+
+  // ── Identity ────────────────────────────────────────────────────────────────
+  /** Unique identifier for this grid instance — required. */
+  gridIdentifier: string;
+
+  /** Identifier used to key persisted column/sort/filter state in localStorage. */
+  stateIdentifier?: string;
+
+  /** Schema version stamp — used by GridStateService to invalidate stale state. */
+  schemaVersion?: number;
+
+  // ── Data source ─────────────────────────────────────────────────────────────
+  /** REST endpoint for fetching initial grid data. */
+  dataSourceUrl?: string;
+
+  /**
+   * When true, the grid issues an HTTP request to dataSourceUrl on gridReady
+   * to preload an initial data snapshot before live streaming begins.
+   */
+  shouldPreloadData?: boolean;
+
+  /**
+   * NEW — When true AND shouldPreloadData is true, the initial snapshot is
+   * fetched via HTTP NDJSON streaming (chunked transfer / Transfer-Encoding:
+   * chunked with Content-Type: application/x-ndjson).
+   *
+   * Each newline-terminated chunk is a single JSON object.  The grid renders
+   * rows progressively as chunks arrive rather than waiting for the full
+   * response body to be buffered.
+   *
+   * Use this for large initial datasets (10k+ rows) where time-to-first-row
+   * matters more than atomic render.
+   *
+   * When false (default), a standard buffered HTTP GET is used.
+   */
+  shouldPreloadStreamData?: boolean;
+
+  // ── Column configuration ─────────────────────────────────────────────────────
+  /** Primary key field name — used for row identity in transactions. */
+  primaryColumnName?: string;
+
+  /** Version field name — used to reject stale streaming updates. */
+  versionColumnName?: string;
+
+  /**
+   * Factory function that returns a partial ColDef for a given field key,
+   * or a full ColDef array for the special sentinels 'LEFT' and 'RIGHT'
+   * (pinned column groups added before/after auto-generated columns).
+   */
+  getCustomColDefFunc?: (key: string) => any;
+
+  /**
+   * Predicate that returns true when a streaming item should be treated
+   * as a removal rather than an add/update.
+   */
+  removalPredicateFunc?: (item: any) => boolean;
+
+  // ── State persistence ────────────────────────────────────────────────────────
+  /** When true, column/sort/filter layout changes are saved to localStorage. */
+  shouldPersistState?: boolean;
+
+  /**
+   * Column IDs whose filter state is managed by the parent grid (e.g. a master
+   * grid filtering a detail grid).  These filters are not persisted or restored
+   * by the grid state service.
+   */
+  parentDrivenFilterColIds?: string[];
+
+  // ── Streaming (WebSocket / RSocket) ──────────────────────────────────────────
+  /** When true, live WebSocket/RSocket updates are applied after initial load. */
+  shouldStreamUpdates?: boolean;
+
+  /** WebSocket host URL, e.g. 'wss://market-data.internal/beam'. */
+  streamingHost?: string;
+
+  /** Route identifier within the WebSocket connection. */
+  streamingRoute?: string;
+
+  /** Subscription payload sent when opening the stream route. */
+  streamingPayload?: any;
+}
